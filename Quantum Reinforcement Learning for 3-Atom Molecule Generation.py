@@ -47,19 +47,11 @@ except ImportError as exc:
         "then re-run this script inside that environment."
     ) from exc
 
-# Allowed heavy atoms; hydrogens are implicit. Broad heavy-atom set; validity now handled by RDKit + RL reward.
+# Allowed heavy atoms; hydrogens are implicit. Kept small for focused training.
 ALLOWED_ATOMS: Sequence[str] = (
-    "B",  # boron
     "C",
     "N",
     "O",
-    "F",
-    "Si",
-    "P",
-    "S",
-    "Cl",
-    "Br",
-    "I",
 )
 # Bond types considered between atom1-atom2 and atom2-atom3; None means no bond.
 BOND_TYPES: Sequence[Optional[rdchem.BondType]] = (
@@ -105,24 +97,32 @@ def build_qmg_prior() -> Optional[Callable[[str], float]]:
 def build_pennylane_prior() -> Optional[Callable[[str], float]]:
     """
     PennyLane prior that maps SMILES -> score via a tiny variational circuit.
-    Lightweight example; swap ansatz/observable with your chemistry model as needed.
+    Here we encode simple SMILES features into rotation angles of a 4-qubit circuit and
+    measure a toy Hamiltonian. Swap ansatz/observable with your chemistry model as needed.
     """
     try:
         import pennylane as qml  # type: ignore
     except Exception:
         return None
 
-    dev = qml.device("default.qubit", wires=2)
+    dev = qml.device("default.qubit", wires=4)
 
-    # Simple 2-qubit entangling ansatz; parameters derive from SMILES features.
+    # Encode simple features into angles, then apply a small entangling ansatz.
     @qml.qnode(dev)
-    def energy_circuit(theta1: float, theta2: float) -> float:
-        qml.RY(theta1, wires=0)
-        qml.RY(theta2, wires=1)
-        qml.CNOT(wires=[0, 1])
-        # Toy Hamiltonian: -Z0 - Z1 + 0.5 * X0 X1
-        coeffs = [-1.0, -1.0, 0.5]
-        ops = [qml.PauliZ(0), qml.PauliZ(1), qml.PauliX(0) @ qml.PauliX(1)]
+    def energy_circuit(t1: float, t2: float, t3: float, t4: float) -> float:
+        qml.AngleEmbedding([t1, t2, t3, t4], wires=[0, 1, 2, 3])
+        qml.BasicEntanglerLayers(weights=qml.math.ones((2, 4)), wires=[0, 1, 2, 3])
+        # Toy Hamiltonian: -Z0 - Z1 - Z2 - Z3 + 0.25 * (X0X1 + X1X2 + X2X3)
+        coeffs = [-1.0, -1.0, -1.0, -1.0, 0.25, 0.25, 0.25]
+        ops = [
+            qml.PauliZ(0),
+            qml.PauliZ(1),
+            qml.PauliZ(2),
+            qml.PauliZ(3),
+            qml.PauliX(0) @ qml.PauliX(1),
+            qml.PauliX(1) @ qml.PauliX(2),
+            qml.PauliX(2) @ qml.PauliX(3),
+        ]
         H = qml.Hamiltonian(coeffs, ops)
         return qml.expval(H)
 
@@ -143,7 +143,11 @@ def build_pennylane_prior() -> Optional[Callable[[str], float]]:
 
     def prior_fn(smiles: str) -> float:
         theta1, theta2 = featurize_smiles(smiles)
-        energy = energy_circuit(theta1, theta2)  # can be negative; lower is better
+        # Derive additional angles from hash for diversity
+        h = int(hashlib.sha256(smiles.encode("utf-8")).hexdigest(), 16)
+        theta3 = ((h % 10_000) / 10_000) * 2 * math.pi
+        theta4 = (((h // 10_000) % 10_000) / 10_000) * 2 * math.pi
+        energy = energy_circuit(theta1, theta2, theta3, theta4)  # can be negative; lower is better
         score = math.exp(-energy)  # map energy to positive score; lower E -> higher score
         return max(0.05, min(score, 5.0))
 
@@ -358,7 +362,7 @@ def main() -> None:
     print("Estimated qubits for 3 heavy atoms:", estimate_qubits(3))
     # Adjust episodes upward for better exploration; here we run longer with higher entropy.
     reinforce_training(
-        episodes=5000,           # stronger training
+        episodes=10000,          # stronger training
         lr=0.02,                 # smaller LR for stability with larger batches
         gamma=0.99,
         prior_fn=prior_fn,
