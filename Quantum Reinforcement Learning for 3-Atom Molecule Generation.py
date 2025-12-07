@@ -98,44 +98,94 @@ def build_qmg_prior() -> Optional[Callable[[str], float]]:
 
 def build_pennylane_prior() -> Optional[Callable[[str], float]]:
     """
-    Quantum prior using PySCF HF energy as a proxy.
-    RDKit -> 3D geometry -> PySCF RHF -> energy -> positive score.
-    This avoids pennylane-qchem dependency and keeps runtime modest.
+    Quantum prior using PySCF -> OpenFermion -> qubit Hamiltonian -> small VQE (PennyLane).
+    RDKit 3D geometry -> PySCF RHF -> FermionHamiltonian -> Jordan-Wigner -> qubit Hamiltonian.
+    Short VQE run to get energy; mapped to a positive score.
     """
     try:
-        from pyscf import gto, scf  # type: ignore
+        import pennylane as qml  # type: ignore
+        from openfermionpyscf import run_pyscf  # type: ignore
+        from openfermion.transforms import jordan_wigner  # type: ignore
+        from openfermion import QubitOperator  # type: ignore
+        import numpy as onp
     except Exception:
         return None
 
     BASIS = "sto-3g"
     cache: dict[str, float] = {}
 
-    def smiles_to_geometry(smiles: str) -> Optional[Tuple[List[str], List[Tuple[float, float, float]]]]:
+    def smiles_to_geometry(smiles: str) -> Optional[List[Tuple[str, Tuple[float, float, float]]]]:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
+            return None
+        # Skip disconnected fragments to reduce bad embeddings
+        if len(Chem.GetMolFrags(mol, asMols=True)) > 1:
             return None
         mol = Chem.AddHs(mol)
         if AllChem.EmbedMolecule(mol, AllChem.ETKDG()) != 0:
             return None
         AllChem.UFFOptimizeMolecule(mol, maxIters=200)
         conf = mol.GetConformer()
-        symbols: List[str] = []
-        coords: List[Tuple[float, float, float]] = []
+        geom: List[Tuple[str, Tuple[float, float, float]]] = []
         for atom in mol.GetAtoms():
             pos = conf.GetAtomPosition(atom.GetIdx())
-            symbols.append(atom.GetSymbol())
-            coords.append((pos.x, pos.y, pos.z))
-        return symbols, coords
+            geom.append((atom.GetSymbol(), (pos.x, pos.y, pos.z)))
+        # Reject geometries with overlapping atoms (singular overlap matrix risk)
+        coords = [c for _, c in geom]
+        for i in range(len(coords)):
+            for j in range(i + 1, len(coords)):
+                dx = coords[i][0] - coords[j][0]
+                dy = coords[i][1] - coords[j][1]
+                dz = coords[i][2] - coords[j][2]
+                if dx * dx + dy * dy + dz * dz < 1e-3:
+                    return None
+        return geom
 
-    def hf_energy(symbols: List[str], coords: List[Tuple[float, float, float]]) -> float:
-        mol = gto.Mole()
-        mol.atom = [(sym, c) for sym, c in zip(symbols, coords)]
-        mol.unit = "Angstrom"
-        mol.basis = BASIS
-        mol.spin = 0  # assume closed shell for small fragments
-        mol.build()
-        mf = scf.RHF(mol)
-        e = mf.kernel()
+    def qubit_hamiltonian(geom: List[Tuple[str, Tuple[float, float, float]]]):
+        # Run PySCF RHF via OpenFermion to get Fermion Hamiltonian, then JW to qubits.
+        data = run_pyscf(geom, basis=BASIS, multiplicity=1, charge=0, run_mp2=False, run_cisd=False, run_ccsd=False, run_fci=False, verbose=0)
+        fermion_ham = data.get_molecular_hamiltonian()
+        qubit_ham = jordan_wigner(fermion_ham)
+        return qubit_ham, data.n_qubits
+
+    def to_pl_hamiltonian(qubit_ham: QubitOperator, n_qubits: int) -> Tuple[List[float], List[qml.ops.PauliWord]]:  # type: ignore
+        coeffs: List[float] = []
+        ops: List[qml.ops.PauliWord] = []
+        for term, coeff in qubit_ham.terms.items():
+            if len(term) == 0:
+                coeffs.append(coeff.real)
+                ops.append(qml.Identity(0))
+                continue
+            paulis = []
+            for idx, pauli_str in term:
+                if pauli_str == "X":
+                    paulis.append(qml.PauliX(idx))
+                elif pauli_str == "Y":
+                    paulis.append(qml.PauliY(idx))
+                elif pauli_str == "Z":
+                    paulis.append(qml.PauliZ(idx))
+            op = paulis[0]
+            for p in paulis[1:]:
+                op = op @ p
+            coeffs.append(coeff.real)
+            ops.append(op)
+        return coeffs, ops
+
+    def vqe_energy(pl_hamiltonian: qml.Hamiltonian, n_qubits: int) -> float:
+        dev = qml.device("default.qubit", wires=n_qubits)
+        layers = 2
+        weights = onp.zeros((layers, n_qubits, 3))
+
+        @qml.qnode(dev)
+        def circuit(w):
+            qml.StronglyEntanglingLayers(w, wires=range(n_qubits))
+            return qml.expval(pl_hamiltonian)
+
+        opt = qml.AdamOptimizer(stepsize=0.1)
+        w = weights
+        e = circuit(w)
+        for _ in range(12):  # small number of steps for speed
+            w, e = opt.step_and_cost(circuit, w)
         return float(e)
 
     def prior_fn(smiles: str) -> float:
@@ -144,11 +194,13 @@ def build_pennylane_prior() -> Optional[Callable[[str], float]]:
         geom = smiles_to_geometry(smiles)
         if geom is None:
             return 0.0
-        symbols, coords = geom
         try:
-            energy = hf_energy(symbols, coords)
-            score = math.exp(-energy)  # lower energy -> higher score
-            score = float(max(0.05, min(score, 5.0)))
+            q_ham, n_qubits = qubit_hamiltonian(geom)
+            coeffs, ops = to_pl_hamiltonian(q_ham, n_qubits)
+            pl_ham = qml.Hamiltonian(coeffs, ops)
+            energy = vqe_energy(pl_ham, n_qubits)
+            # Map energy to a bounded positive score; lower energy -> higher score.
+            score = max(0.05, min(2.5, math.exp(-energy / 5.0)))
             cache[smiles] = score
             return score
         except Exception:
@@ -298,13 +350,22 @@ def reinforce_training(
         atoms, bonds, log_prob, entropy = sample_action(policy, temperature=temperature)
         smiles, valid = atoms_bonds_to_smiles(atoms, bonds)
         valid_count += int(valid)
+        # Enforce connectivity: if RDKit built fragments ('.' in SMILES), treat as invalid
+        if valid and smiles and "." in smiles:
+            valid = 0.0
         unique = 1.0 if smiles and smiles not in seen_smiles else 0.0
         if unique:
             seen_smiles.add(smiles)
             discovered.append(smiles)
 
         quantum_bias = quantum_prior_score(smiles, prior_fn=prior_fn)
-        reward = valid * unique * quantum_bias  # encourages valid & novel; bias can be swapped with QMG energy proxy
+        # Reward: valid + unique -> quantum_bias; duplicates (still valid) get a modest penalty to encourage diversity.
+        if valid and unique:
+            reward = quantum_bias
+        elif valid and not unique:
+            reward = -0.02
+        else:
+            reward = 0.0
         rewards.append(reward)
 
         baseline = 0.9 * baseline + 0.1 * reward
@@ -365,14 +426,14 @@ def main() -> None:
     print("Estimated qubits for 3 heavy atoms:", estimate_qubits(3))
     # Adjust episodes upward for better exploration; here we run longer with higher entropy.
     reinforce_training(
-        episodes=10000,          # stronger training
+        episodes=20000,          # stronger training
         lr=0.02,                 # smaller LR for stability with larger batches
         gamma=0.99,
         prior_fn=prior_fn,
-        entropy_coef=0.03,       # exploration via entropy
-        temperature=1.5,         # start hotter
+        entropy_coef=0.05,       # slightly stronger exploration via entropy
+        temperature=1.7,         # start a bit hotter to diversify
         min_temperature=0.6,
-        temp_decay=0.998,        # slower cooling to keep exploring longer
+        temp_decay=0.998,        # moderate cooling
         batch_size=16,           # mini-batch REINFORCE updates
         max_grad_norm=1.0,       # gradient clipping for stability
     )

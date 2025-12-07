@@ -2,27 +2,29 @@
 
 ![Reinforcement Learning Loop](assets/rl-diagram.jpg)
 
-Reinforcement-learning (REINFORCE) policy that samples three heavy atoms and two bonds, builds candidate molecules with RDKit, and scores them with a quantum-guided prior. The default prior uses PySCF HF energy as a real quantum-chemistry proxy; a CUDA-Q/QMG hook remains for alternative backends. Objective: maximize `reward = validity x uniqueness x quantum_prior`, pushing the product toward 1.
+Reinforcement-learning (REINFORCE) agent that samples 3 heavy atoms and 2 bonds, builds molecules with RDKit, and scores them with a quantum prior. The default prior uses PySCF + OpenFermion (Jordan–Wigner) to produce a qubit Hamiltonian and runs a short PennyLane VQE to obtain an energy proxy; a CUDA-Q/QMG hook remains available. Goal: maximize `reward = validity × uniqueness × quantum_prior`.
 
-## Key Features
-- 3-atom generator: heavy-atom set (`C, N, O`) with bond choices `NONE/Single/Double/Triple`.
-- Quantum prior: PySCF HF energy (sto-3g) included; pluggable QMG/CUDA-Q prior hook.
-- RL training: entropy-regularized REINFORCE, temperature annealing, mini-batch updates, gradient clipping (10k steps default).
-- Reporting: periodic prints of atoms/bonds/SMILES; final summary of samples, validity, uniqueness, reward stats, and unique valid SMILES.
+## Features
+- **Chemical space**: atoms = (`C, N, O`); bonds = `NONE / Single / Double / Triple`.
+- **Quantum prior**: PySCF (sto-3g) → OpenFermion JW → PennyLane VQE (`StronglyEntanglingLayers`) → energy mapped to score.
+- **RL**: entropy-regularized REINFORCE, temperature annealing, mini-batch updates, gradient clipping; 20k episodes by default.
+- **Filtering**: rejects disconnected SMILES and overlapping geometries; invalid/duplicate penalties encourage diversity.
+- **Logging**: prints atoms/bonds/SMILES every 50 steps; final summary of samples, validity, uniqueness, reward stats, and unique valid SMILES.
 
 ## How It Works
-1. Policy samples `(atom1, atom2, atom3, bond1, bond2)` with temperature and entropy regularization.
-2. RDKit attempts to build a chain (0-1, 1-2); failure -> `valid=0`.
-3. Reward = `valid x uniqueness x quantum_prior`. PennyLane prior maps SMILES -> energy -> positive score; QMG/CUDA-Q hook can replace it.
-4. REINFORCE updates parameters in mini-batches with gradient clipping.
+1. Policy samples `(atom1, atom2, atom3, bond1, bond2)` with temperature + entropy control.
+2. RDKit builds a chain (0–1, 1–2); disconnected or failed builds → invalid.
+3. PySCF HF computes integrals; OpenFermion generates a fermionic Hamiltonian, mapped to qubit Hamiltonian (JW); PennyLane VQE estimates energy; energy → score (`exp(-E/5)` bounded).
+4. Reward = quantum score if valid & unique; duplicates penalized; invalid = 0.
+5. Mini-batch REINFORCE updates with gradient clipping.
 
-## Environment & Setup
+## Environment & Setup (WSL/Linux recommended)
 ```bash
-conda create -n qmg python=3.11 rdkit -c conda-forge -y
+conda create -n qmg python=3.10 rdkit pytorch cpuonly numpy=1.26.4 h5py=3.10 -c conda-forge -c pytorch -y
 conda activate qmg
-pip install torch pennylane pyscf
+pip install --no-cache-dir pennylane pyscf openfermion openfermionpyscf
 ```
-Optional: install CUDA-Q/QMG stack if you plan to use the QMG prior.
+If CUDA-Q/QMG is needed, install your CUDA-Q stack and fill the hook in `build_qmg_prior`.
 
 ## Run
 ```bash
@@ -30,21 +32,14 @@ conda activate qmg
 python "Quantum Reinforcement Learning for 3-Atom Molecule Generation.py"
 ```
 
-## Tuning Knobs (in `reinforce_training`)
-- `episodes`: total training steps (default 10000).
-- `lr`: learning rate (default 0.02).
-- `entropy_coef`: exploration strength (default 0.03).
-- `temperature`, `temp_decay`, `min_temperature`: controls exploration->exploitation annealing.
-- `batch_size`: mini-batch size for REINFORCE updates (default 16).
-- `max_grad_norm`: gradient clipping (default 1.0).
-
-## Quantum Prior Integration
-- PySCF HF (default): `build_pennylane_prior` computes HF energy (sto-3g) and maps to score via `exp(-E)`. Adjust basis if desired.
-- QMG/CUDA-Q: implement `build_qmg_prior` so `prior_fn(smiles) -> non-negative score` (typical `max(0, -energy)`).
+## Key Tunables (see `reinforce_training`)
+- `episodes` (default 20000), `lr` (0.02), `entropy_coef` (0.05), `temperature` / `temp_decay` / `min_temperature`
+- `batch_size` (16), `max_grad_norm` (1.0)
+- Prior scaling in `build_pennylane_prior` (`exp(-E/5)` clamped to [0.05, 2.5]); duplicate penalty (-0.02) in reward logic.
 
 ## Outputs
-- Console log every 50 steps: reward, valid/unique flags, quantum bias, atoms, bonds, temperature, entropy, SMILES.
-- Final summary: sample count, valid count, unique valid count, reward max/mean, best candidate, and full list of unique valid SMILES.
+- Every 50 steps: reward, valid/unique flags, quantum bias, atoms, bonds, temp, entropy, SMILES.
+- Final: sample count, valid count, unique valid count, reward max/mean, best SMILES, list of unique valid SMILES.
 
 ## Project Layout
 ```
