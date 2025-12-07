@@ -2,11 +2,11 @@
 
 ![Reinforcement Learning Loop](assets/rl-diagram.jpg)
 
-Reinforcement-learning (REINFORCE) policy that samples three heavy atoms and two bonds, builds candidate molecules with RDKit, and scores them with a quantum-guided prior. A PennyLane qchem VQE (PySCF backend) provides a simplified quantum-chemistry energy proxy (small active space, short VQE); a CUDA-Q/QMG hook remains for alternative backends. Objective: maximize `reward = validity x uniqueness x quantum_prior`, pushing the product toward 1.
+Reinforcement-learning (REINFORCE) policy that samples three heavy atoms and two bonds, builds candidate molecules with RDKit, and scores them with a quantum-guided prior. The default prior uses PySCF HF energy as a real quantum-chemistry proxy; a CUDA-Q/QMG hook remains for alternative backends. Objective: maximize `reward = validity x uniqueness x quantum_prior`, pushing the product toward 1.
 
 ## Key Features
 - 3-atom generator: heavy-atom set (`C, N, O`) with bond choices `NONE/Single/Double/Triple`.
-- Quantum prior: PennyLane qchem VQE (PySCF, sto-3g, small active space) included; pluggable QMG/CUDA-Q prior hook.
+- Quantum prior: PySCF HF energy (sto-3g) included; pluggable QMG/CUDA-Q prior hook.
 - RL training: entropy-regularized REINFORCE, temperature annealing, mini-batch updates, gradient clipping (10k steps default).
 - Reporting: periodic prints of atoms/bonds/SMILES; final summary of samples, validity, uniqueness, reward stats, and unique valid SMILES.
 
@@ -20,7 +20,7 @@ Reinforcement-learning (REINFORCE) policy that samples three heavy atoms and two
 ```bash
 conda create -n qmg python=3.11 rdkit -c conda-forge -y
 conda activate qmg
-pip install torch pennylane pennylane-qchem pyscf
+pip install torch pennylane pyscf
 ```
 Optional: install CUDA-Q/QMG stack if you plan to use the QMG prior.
 
@@ -39,7 +39,7 @@ python "Quantum Reinforcement Learning for 3-Atom Molecule Generation.py"
 - `max_grad_norm`: gradient clipping (default 1.0).
 
 ## Quantum Prior Integration
-- PennyLane (default, qchem VQE): `build_pennylane_prior` builds a molecular Hamiltonian via PySCF (sto-3g, active_electrons=4, active_orbitals=4) and runs a short UCCSD VQE to get energy; maps to score via `exp(-E)`. Tune active space / VQE steps for accuracy vs speed.
+- PySCF HF (default): `build_pennylane_prior` computes HF energy (sto-3g) and maps to score via `exp(-E)`. Adjust basis if desired.
 - QMG/CUDA-Q: implement `build_qmg_prior` so `prior_fn(smiles) -> non-negative score` (typical `max(0, -energy)`).
 
 ## Outputs

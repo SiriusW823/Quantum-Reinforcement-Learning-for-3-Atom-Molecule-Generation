@@ -98,27 +98,19 @@ def build_qmg_prior() -> Optional[Callable[[str], float]]:
 
 def build_pennylane_prior() -> Optional[Callable[[str], float]]:
     """
-    PennyLane prior that maps SMILES -> score via a simplified quantum chemistry VQE.
-    This uses RDKit -> 3D geom -> PennyLane qchem (PySCF) to build a molecular Hamiltonian
-    with a small active space, then runs a short VQE (UCCSD) to obtain an energy proxy.
-    NOTE: This is still approximate; adjust active space/steps for your accuracy needs.
+    Quantum prior using PySCF HF energy as a proxy.
+    RDKit -> 3D geometry -> PySCF RHF -> energy -> positive score.
+    This avoids pennylane-qchem dependency and keeps runtime modest.
     """
     try:
-        import pennylane as qml  # type: ignore
-        from pennylane import qchem
+        from pyscf import gto, scf  # type: ignore
     except Exception:
         return None
 
     BASIS = "sto-3g"
-    ACTIVE_E = 4       # active electrons (even)
-    ACTIVE_ORB = 4     # active orbitals
-    VQE_STEPS = 10     # keep small for speed; raise for accuracy
-    STEP_SIZE = 0.2
-
     cache: dict[str, float] = {}
-    dev = qml.device("default.qubit", wires=2 * ACTIVE_ORB)
 
-    def smiles_to_geometry(smiles: str) -> Optional[Tuple[List[str], List[Tuple[float, float, float]], int]]:
+    def smiles_to_geometry(smiles: str) -> Optional[Tuple[List[str], List[Tuple[float, float, float]]]]:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
             return None
@@ -129,40 +121,21 @@ def build_pennylane_prior() -> Optional[Callable[[str], float]]:
         conf = mol.GetConformer()
         symbols: List[str] = []
         coords: List[Tuple[float, float, float]] = []
-        electrons = 0
         for atom in mol.GetAtoms():
             pos = conf.GetAtomPosition(atom.GetIdx())
             symbols.append(atom.GetSymbol())
             coords.append((pos.x, pos.y, pos.z))
-            electrons += atom.GetAtomicNum()
-        return symbols, coords, electrons
+        return symbols, coords
 
-    def build_hamiltonian(symbols: List[str], coords: List[Tuple[float, float, float]]):
-        h, _ = qchem.molecular_hamiltonian(
-            symbols,
-            coords,
-            basis=BASIS,
-            active_electrons=ACTIVE_E,
-            active_orbitals=ACTIVE_ORB,
-        )
-        return h
-
-    def vqe_energy(hamiltonian: qml.Hamiltonian) -> float:
-        n_qubits = 2 * ACTIVE_ORB
-        wires = list(range(n_qubits))
-        n_params = qchem.UCCSD.shape(n_qubits, ACTIVE_E)
-        params = np.zeros(n_params)
-
-        @qml.qnode(dev)
-        def circuit(p):
-            qchem.UCCSD(p, wires=wires)
-            return qml.expval(hamiltonian)
-
-        opt = qml.GradientDescentOptimizer(stepsize=STEP_SIZE)
-        e = circuit(params)
-        p = params
-        for _ in range(VQE_STEPS):
-            p, e = opt.step_and_cost(circuit, p)
+    def hf_energy(symbols: List[str], coords: List[Tuple[float, float, float]]) -> float:
+        mol = gto.Mole()
+        mol.atom = [(sym, c) for sym, c in zip(symbols, coords)]
+        mol.unit = "Angstrom"
+        mol.basis = BASIS
+        mol.spin = 0  # assume closed shell for small fragments
+        mol.build()
+        mf = scf.RHF(mol)
+        e = mf.kernel()
         return float(e)
 
     def prior_fn(smiles: str) -> float:
@@ -171,10 +144,9 @@ def build_pennylane_prior() -> Optional[Callable[[str], float]]:
         geom = smiles_to_geometry(smiles)
         if geom is None:
             return 0.0
-        symbols, coords, _ = geom
+        symbols, coords = geom
         try:
-            H = build_hamiltonian(symbols, coords)
-            energy = vqe_energy(H)  # variational estimate
+            energy = hf_energy(symbols, coords)
             score = math.exp(-energy)  # lower energy -> higher score
             score = float(max(0.05, min(score, 5.0)))
             cache[smiles] = score
