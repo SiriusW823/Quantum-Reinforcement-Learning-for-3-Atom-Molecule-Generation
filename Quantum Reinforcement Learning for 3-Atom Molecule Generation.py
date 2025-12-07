@@ -2,7 +2,7 @@
 Quantum RL for 3-atom heavy-atom molecules.
 
 - Samples 3 heavy atoms and 2 bonds (1-2, 2-3), converts to SMILES with RDKit.
-- Reward = validity * uniqueness * quantum_prior (default hashed proxy), targeting 1.0 for valid+novel+good prior.
+- Reward = validity * uniqueness * quantum_prior (default PennyLane toy circuit; replace with real chemistry model), targeting 1.0 for valid+novel+good prior.
 - Policy optimized with REINFORCE. Quantum prior hook (PennyLane/cudaq/QMG) is pluggable where noted.
 
 Dependencies (install before running):
@@ -21,6 +21,7 @@ import random
 import sys
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
+import numpy as np
 
 # Avoid OpenMP runtime conflicts (libomp vs libiomp) often seen on Windows with PyTorch/RDKit.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
@@ -34,6 +35,7 @@ try:
     from rdkit import Chem
     from rdkit.Chem import rdchem
     from rdkit import RDLogger
+    from rdkit.Chem import AllChem
     RDLogger.DisableLog("rdApp.*")  # silence valence warnings in stdout; we handle validity explicitly
 except ImportError as exc:
     py_ver = f"{sys.version_info.major}.{sys.version_info.minor}"
@@ -96,60 +98,89 @@ def build_qmg_prior() -> Optional[Callable[[str], float]]:
 
 def build_pennylane_prior() -> Optional[Callable[[str], float]]:
     """
-    PennyLane prior that maps SMILES -> score via a tiny variational circuit.
-    Here we encode simple SMILES features into rotation angles of a 4-qubit circuit and
-    measure a toy Hamiltonian. Swap ansatz/observable with your chemistry model as needed.
+    PennyLane prior that maps SMILES -> score via a simplified quantum chemistry VQE.
+    This uses RDKit -> 3D geom -> PennyLane qchem (PySCF) to build a molecular Hamiltonian
+    with a small active space, then runs a short VQE (UCCSD) to obtain an energy proxy.
+    NOTE: This is still approximate; adjust active space/steps for your accuracy needs.
     """
     try:
         import pennylane as qml  # type: ignore
+        from pennylane import qchem
     except Exception:
         return None
 
-    dev = qml.device("default.qubit", wires=4)
+    BASIS = "sto-3g"
+    ACTIVE_E = 4       # active electrons (even)
+    ACTIVE_ORB = 4     # active orbitals
+    VQE_STEPS = 10     # keep small for speed; raise for accuracy
+    STEP_SIZE = 0.2
 
-    # Encode simple features into angles, then apply a small entangling ansatz.
-    @qml.qnode(dev)
-    def energy_circuit(t1: float, t2: float, t3: float, t4: float) -> float:
-        qml.AngleEmbedding([t1, t2, t3, t4], wires=[0, 1, 2, 3])
-        qml.BasicEntanglerLayers(weights=qml.math.ones((2, 4)), wires=[0, 1, 2, 3])
-        # Toy Hamiltonian: -Z0 - Z1 - Z2 - Z3 + 0.25 * (X0X1 + X1X2 + X2X3)
-        coeffs = [-1.0, -1.0, -1.0, -1.0, 0.25, 0.25, 0.25]
-        ops = [
-            qml.PauliZ(0),
-            qml.PauliZ(1),
-            qml.PauliZ(2),
-            qml.PauliZ(3),
-            qml.PauliX(0) @ qml.PauliX(1),
-            qml.PauliX(1) @ qml.PauliX(2),
-            qml.PauliX(2) @ qml.PauliX(3),
-        ]
-        H = qml.Hamiltonian(coeffs, ops)
-        return qml.expval(H)
+    cache: dict[str, float] = {}
+    dev = qml.device("default.qubit", wires=2 * ACTIVE_ORB)
 
-    def featurize_smiles(smiles: str) -> Tuple[float, float]:
+    def smiles_to_geometry(smiles: str) -> Optional[Tuple[List[str], List[Tuple[float, float, float]], int]]:
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
-            return 0.0, 0.0
-        num_atoms = mol.GetNumHeavyAtoms()
-        bond_orders = []
-        for b in mol.GetBonds():
-            bo = b.GetBondTypeAsDouble()
-            bond_orders.append(bo)
-        avg_bo = sum(bond_orders) / len(bond_orders) if bond_orders else 1.0
-        # Map to angles
-        theta1 = (num_atoms % 12) / 12.0 * 2 * math.pi
-        theta2 = (avg_bo / 3.0) * math.pi
-        return theta1, theta2
+            return None
+        mol = Chem.AddHs(mol)
+        if AllChem.EmbedMolecule(mol, AllChem.ETKDG()) != 0:
+            return None
+        AllChem.UFFOptimizeMolecule(mol, maxIters=200)
+        conf = mol.GetConformer()
+        symbols: List[str] = []
+        coords: List[Tuple[float, float, float]] = []
+        electrons = 0
+        for atom in mol.GetAtoms():
+            pos = conf.GetAtomPosition(atom.GetIdx())
+            symbols.append(atom.GetSymbol())
+            coords.append((pos.x, pos.y, pos.z))
+            electrons += atom.GetAtomicNum()
+        return symbols, coords, electrons
+
+    def build_hamiltonian(symbols: List[str], coords: List[Tuple[float, float, float]]):
+        h, _ = qchem.molecular_hamiltonian(
+            symbols,
+            coords,
+            basis=BASIS,
+            active_electrons=ACTIVE_E,
+            active_orbitals=ACTIVE_ORB,
+        )
+        return h
+
+    def vqe_energy(hamiltonian: qml.Hamiltonian) -> float:
+        n_qubits = 2 * ACTIVE_ORB
+        wires = list(range(n_qubits))
+        n_params = qchem.UCCSD.shape(n_qubits, ACTIVE_E)
+        params = np.zeros(n_params)
+
+        @qml.qnode(dev)
+        def circuit(p):
+            qchem.UCCSD(p, wires=wires)
+            return qml.expval(hamiltonian)
+
+        opt = qml.GradientDescentOptimizer(stepsize=STEP_SIZE)
+        e = circuit(params)
+        p = params
+        for _ in range(VQE_STEPS):
+            p, e = opt.step_and_cost(circuit, p)
+        return float(e)
 
     def prior_fn(smiles: str) -> float:
-        theta1, theta2 = featurize_smiles(smiles)
-        # Derive additional angles from hash for diversity
-        h = int(hashlib.sha256(smiles.encode("utf-8")).hexdigest(), 16)
-        theta3 = ((h % 10_000) / 10_000) * 2 * math.pi
-        theta4 = (((h // 10_000) % 10_000) / 10_000) * 2 * math.pi
-        energy = energy_circuit(theta1, theta2, theta3, theta4)  # can be negative; lower is better
-        score = math.exp(-energy)  # map energy to positive score; lower E -> higher score
-        return max(0.05, min(score, 5.0))
+        if smiles in cache:
+            return cache[smiles]
+        geom = smiles_to_geometry(smiles)
+        if geom is None:
+            return 0.0
+        symbols, coords, _ = geom
+        try:
+            H = build_hamiltonian(symbols, coords)
+            energy = vqe_energy(H)  # variational estimate
+            score = math.exp(-energy)  # lower energy -> higher score
+            score = float(max(0.05, min(score, 5.0)))
+            cache[smiles] = score
+            return score
+        except Exception:
+            return 0.0
 
     return prior_fn
 
