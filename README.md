@@ -2,35 +2,57 @@
 
 ![Reinforcement Learning Loop](assets/rl-diagram.jpg)
 
-This repository contains a reinforcement-learning (REINFORCE) policy that samples three heavy atoms and two bonds, builds candidate molecules with RDKit, and uses a quantum-guided prior (PennyLane by default; CUDA-Q/QMG hook included) to bias generation toward low-energy, valid, and unique SMILES. The goal is to maximize `reward = validity × uniqueness × quantum_prior`, driving the product toward 1.
+Reinforcement-learning (REINFORCE) policy that samples three heavy atoms and two bonds, builds candidate molecules with RDKit, and scores them with a quantum-guided prior (PennyLane by default; CUDA-Q/QMG hook included). Objective: maximize `reward = validity × uniqueness × quantum_prior`, pushing the product toward 1.
 
-## Highlights
-- **3-atom generator**: heavy-atom set (`B,C,N,O,F,Si,P,S,Cl,Br,I`) with bond choices `NONE/Single/Double/Triple`.
-- **Quantum prior**: PennyLane two-qubit toy circuit included; swap in your chemistry ansatz or QMG/CUDA-Q energy estimator via the provided hooks.
-- **RL training**: entropy-regularized REINFORCE with temperature annealing, mini-batch updates, and gradient clipping for stability.
-- **Reporting**: prints atoms/bonds/SMILES during training; final summary of samples, validity, uniqueness, reward stats, and all unique valid SMILES.
+## Key Features
+- 3-atom generator: heavy-atom set (`B,C,N,O,F,Si,P,S,Cl,Br,I`) with bond choices `NONE/Single/Double/Triple`.
+- Quantum prior: PennyLane two-qubit circuit provided; pluggable QMG/CUDA-Q prior hook included.
+- RL training: entropy-regularized REINFORCE, temperature annealing, mini-batch updates, gradient clipping.
+- Reporting: periodic prints of atoms/bonds/SMILES; final summary of samples, validity, uniqueness, reward stats, and unique valid SMILES.
 
-## Environment & Dependencies
+## How It Works
+1. Policy samples `(atom1, atom2, atom3, bond1, bond2)` with temperature and entropy regularization.
+2. RDKit attempts to build a chain (0-1, 1-2); failure ⇒ `valid=0`.
+3. Reward = `valid × uniqueness × quantum_prior`. PennyLane prior maps SMILES → energy → positive score; QMG/CUDA-Q hook can replace it.
+4. REINFORCE updates parameters in mini-batches with gradient clipping.
+
+## Environment & Setup
 ```bash
 conda create -n qmg python=3.11 rdkit -c conda-forge -y
 conda activate qmg
 pip install torch pennylane
 ```
-CUDA-Q/QMG users: install your CUDA-Q stack and fill in the QMG prior hook.
+Optional: install CUDA-Q/QMG stack if you plan to use the QMG prior.
 
-## How to Run
+## Run
 ```bash
 conda activate qmg
 python "Quantum Reinforcement Learning for 3-Atom Molecule Generation.py"
 ```
-Key tunables are in `reinforce_training` (episodes, lr, entropy_coef, temperature schedule, batch_size).
+
+## Tuning Knobs (in `reinforce_training`)
+- `episodes`: total training steps (default 5000).
+- `lr`: learning rate (default 0.02).
+- `entropy_coef`: exploration strength (default 0.03).
+- `temperature`, `temp_decay`, `min_temperature`: controls exploration→exploitation annealing.
+- `batch_size`: mini-batch size for REINFORCE updates (default 16).
+- `max_grad_norm`: gradient clipping (default 1.0).
 
 ## Quantum Prior Integration
-- PennyLane: edit `build_pennylane_prior` to drop in your ansatz/observable and SMILES→Hamiltonian mapping.
-- QMG/CUDA-Q: implement `build_qmg_prior` so `prior_fn(smiles) -> non-negative score` (e.g., `max(0, -energy)`).
+- PennyLane (default): edit `build_pennylane_prior` to drop in your ansatz/observable and SMILES→Hamiltonian mapping. Return a non-negative score (e.g., `max(0, f(-energy))`).
+- QMG/CUDA-Q: implement `build_qmg_prior` so `prior_fn(smiles) -> non-negative score` (typical `max(0, -energy)`).
 
-## RL Loop (diagram)
-Place your RL diagram image at `assets/rl-diagram.png` to render in this README (the provided diagram corresponds to the standard agent–environment loop).
+## Outputs
+- Console log every 50 steps: reward, valid/unique flags, quantum bias, atoms, bonds, temperature, entropy, SMILES.
+- Final summary: sample count, valid count, unique valid count, reward max/mean, best candidate, and full list of unique valid SMILES.
+
+## Project Layout
+```
+Quantum Reinforcement Learning for 3-Atom Molecule Generation.py  # main script
+README.md
+LICENSE
+assets/rl-diagram.jpg
+```
 
 ## License
 All rights reserved. No permission is granted to use, copy, modify, or distribute this work without explicit written consent from the author.
