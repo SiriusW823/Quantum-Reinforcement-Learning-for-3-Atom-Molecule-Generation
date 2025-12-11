@@ -1,96 +1,59 @@
-## Quantum RL for 3‑Atom Molecule Generation (Fully Quantum Agents)
+## Full Quantum Reinforcement Learning for 5-Atom Molecule Generation
 
-This repository implements a **fully quantum actor–critic** pipeline for small-molecule generation. The environment is classical (RDKit) for molecule construction/validation, while both the **generator (actor)** and the **helper (critic/prior)** are parametrized quantum circuits (PQCs) built with PennyLane. The objective is to maximize:
+This project implements a **fully quantum actor–critic** (two Codex) system for de novo molecule generation with up to **5 heavy atoms**. All learning components are Variational Quantum Circuits (VQCs) built in PennyLane; no classical neural networks are used for policy or value estimation. RDKit is used only for classical molecule construction and validity checks.
 
+### Chemistry Constraints (hard-coded)
+- Max heavy atoms: 5 (Atom1 → Bond1 → Atom2 → Bond2 → Atom3 → Bond3 → Atom4 → Bond4 → Atom5).
+- Allowed atoms: `['NONE', 'C', 'N', 'O']` (NONE = padding/stop).
+- Allowed bonds: `['NONE', 'SINGLE', 'DOUBLE', 'TRIPLE']`.
+- If an atom action is `NONE`, generation terminates (later positions are padded with NONE; bonds beyond termination are forced to NONE).
+
+### Architecture (Two Codex: Quantum Actor–Critic)
+- **Actor (Agent A):** PennyLane VQC with AngleEmbedding + StronglyEntanglingLayers (8–10 qubits). Produces logits (via PQC expectation values) for 4-way discrete actions (atom or bond) at each step.
+- **Critic (Agent B):** PennyLane VQC estimating state value `V(s)` from the encoded action history to compute an advantage for policy gradient variance reduction.
+- **Reward:** Encourages the golden metric `(valid/samples) * (unique_valid/samples) → 1`. Invalid or duplicate molecules receive near-zero/negative reward; valid-unique molecules receive `+1`.
+- **Training Loop:** Quantum policy gradient (REINFORCE with value baseline). No classical linear layers are used for “intelligence”; all learnable parameters reside in the quantum circuits.
+
+### Project Layout
 ```
-valid_ratio = valid_count  / samples
-unique_ratio = unique_valid / samples
-target_metric = valid_ratio * unique_ratio  → 1
-```
-
-### Key Components
-- **Environment (classical, RDKit):** builds SMILES from sampled atoms/bonds, enforces connectivity, tracks validity/uniqueness.
-- **Quantum Generator (actor):** PQC (AngleEmbedding + StronglyEntanglingLayers) outputs logits for atom and bond choices; trained via policy gradient with parameter-shift.
-- **Quantum Helper (critic/prior):** PQC mapping SMILES fingerprints to a scalar value, shaping reward; optional VQE-based chemistry prior (PySCF + OpenFermion + PennyLane) for physical energy bias.
-- **Reward:** default `reward = valid ? novelty_classical * novelty_quantum * quantum_prior : -0.02 (if repeated) or 0 (if invalid)`, then scaled by `(1 + critic_value)`. Novelty includes hash + kNN (classical) and a quantum fidelity proxy.
-
-### Project Structure
-```
-agents/
-  quantum_policy.py      # PQC actor
-  quantum_helper.py      # PQC critic/prior
-configs/
-  config.py              # Python config (default)
-  default_3atom.yaml     # YAML snapshot of defaults
-env/
-  chem.py                # RDKit atom/bond utils, geometry, valence helpers
-  molecule_env.py        # Environment wrapper with counters
-quantum/
-  encoder.py             # SMILES→state encoder (AngleEmbedding)
-  encodings.py           # Feature encodings (counts + FP)
-  pqc_blocks.py          # Reusable PQC builders
-  prior.py               # Optional VQE prior (PySCF + OpenFermion + PennyLane)
-training/
-  loop.py                # Actor–critic training loop
-  novelty.py             # Classical novelty (hash + kNN)
-  utils.py               # Plotting utilities
-scripts/
-  train_3atom_full_quantum.py  # Entry point
-LICENSE
-README.md
+.
+├── README.md
+├── requirements.txt
+├── setup_git.sh
+├── src/
+│   ├── __init__.py
+│   ├── circuits.py       # actor_qnode, critic_qnode (StronglyEntanglingLayers)
+│   ├── embedding.py      # encode 9-step history -> AngleEmbedding angles
+│   ├── environment.py    # RDKit-backed environment for 5-atom linear molecules
+│   └── agent.py          # QuantumActorCritic (sampling, loss, updates)
+└── train.py              # Training loop, golden metric logging
 ```
 
-### Installation (example, conda)
+### Installation
 ```bash
-# Create env (Python ≥3.11)
-conda create -n qrl python=3.11 rdkit -c conda-forge -y
-conda activate qrl
-
-# Install core packages
-pip install torch pennylane pyscf openfermion openfermionpyscf matplotlib
+python -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
 ```
-> If PySCF/OpenFermion wheels are unavailable on your platform, install via conda-forge or prebuilt wheels as appropriate.
+> RDKit wheels on some platforms may require conda-forge. If `pip install rdkit-pypi` fails, install RDKit via conda and the rest via pip.
 
-### Training
-Run the full quantum actor–critic (defaults for 3 atoms):
+### Run Training
 ```bash
-python scripts/train_3atom_full_quantum.py
+python train.py
 ```
-Optional flag to disable the VQE prior:
-```bash
-python scripts/train_3atom_full_quantum.py --quantum-prior
-```
-(flag present; defaults to enabled)
-
 Outputs:
-- Console logs every `log_interval` episodes.
-- `convergence.png` plotting valid/samples, unique/samples, and their product.
+- Console logs with reward, valid/unique counts, and the golden metric.
+- The policy operates purely with VQC parameters; no classical dense layers.
 
-### Configuration
-- Python defaults: `configs/config.py`
-- YAML snapshot: `configs/default_3atom.yaml` (not auto-loaded; provided for reference/versioning)
+### Notes
+- Qubits: default 10 wires for both actor and critic to accommodate the 9-step history plus slack.
+- State encoding: each discrete token (0–3) is mapped to an angle in `[0, π]`; padded to wire count.
+- RDKit validity: linear chain assembly; fragments or invalid valence are marked invalid. Unique tracking is by canonical SMILES.
+- Reward shaping: `+1` for valid & unique, `-0.1` for valid but duplicate, `0` for invalid. Advantage = reward - V(s).
 
-Key knobs:
-- `chem.allowed_atoms`, `chem.num_atoms` (default 3 heavy atoms: C/N/O)
-- `rl.*` (episodes, lr, temperature schedule, entropy coef, batch size)
-- `quantum.*` (VQE prior settings, penalty weights, target qubits)
-- `encoder.n_qubits` (for quantum encoding)
-
-### How It Works (Pipeline)
-1. **Actor PQC** samples atoms/bonds → candidate molecule.
-2. **Environment (RDKit)** builds and sanitizes SMILES, checks connectivity, updates validity/uniqueness stats.
-3. **Novelty & Prior**
-   - Classical novelty: frequency-based hash + kNN on fingerprints.
-   - Quantum novelty: fidelity proxy on embedded states.
-   - Quantum prior: optional VQE energy score from PySCF/OpenFermion → PennyLane.
-4. **Critic PQC** evaluates SMILES features → scalar value.
-5. **Reward** combines validity, novelty, prior, and critic bonus; gradients flow via parameter-shift to both actor and critic.
-6. Metrics tracked: valid_ratio, unique_ratio, target_metric, convergence plot saved.
-
-### Notes and Limits
-- Environment stays classical (RDKit) by design; all learning components are quantum PQCs.
-- VQE prior is CPU-only and approximate; disable via `--quantum-prior` if too slow.
-- Qubit counts are kept modest (4–8) for tractability on CPU simulators.
-
-### License
-See `LICENSE` (unchanged).
+### Golden Metric
+The objective is to push:
+```
+Score = (Valid Count / Total Samples) * (Unique Valid Count / Total Samples)  → 1.0
+```
+Training is configured to directly reward this target.
