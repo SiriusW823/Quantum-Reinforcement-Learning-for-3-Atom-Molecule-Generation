@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.distributions as D
 import pennylane as qml
+import random
 
 from src.circuits import actor_qnode, critic_qnode
 from src.embedding import encode_state
@@ -78,22 +79,27 @@ def run_episode(agent: QuantumActorCritic, env: MoleculeEnv, seen: set[str]) -> 
     values = []
     history = []
     done = False
+    epsilon = 0.2  # exploration rate
 
     while not done:
         action, logp, ent = agent.act(history)
+        # epsilon-greedy exploration
+        if random.random() < epsilon:
+            if len(history) == 0:
+                action = random.choice([1, 2, 3])  # first atom cannot be NONE
+            else:
+                action = random.randint(0, 3)
+            state_vec = encode_state(history, n_wires=agent.n_wires)
+            dist = agent.policy(state_vec)
+            logp = dist.log_prob(torch.tensor(action))
+            ent = dist.entropy()
         # enforce first atom is not NONE (0) to avoid trivial invalid episodes
-        if len(history) == 0:
-            tries = 0
-            while action == 0 and tries < 5:
-                action, logp, ent = agent.act(history)
-                tries += 1
-            if action == 0:
-                action = 1  # fallback to Carbon
-                # recompute distribution/logp/ent for that forced action
-                state_vec = encode_state(history, n_wires=agent.n_wires)
-                dist = agent.policy(state_vec)
-                logp = dist.log_prob(torch.tensor(action))
-                ent = dist.entropy()
+        if len(history) == 0 and action == 0:
+            action = 1  # fallback to Carbon
+            state_vec = encode_state(history, n_wires=agent.n_wires)
+            dist = agent.policy(state_vec)
+            logp = dist.log_prob(torch.tensor(action))
+            ent = dist.entropy()
         state_vec = encode_state(history, n_wires=agent.n_wires)
         val = agent.value(state_vec)
         history.append(action)

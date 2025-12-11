@@ -80,7 +80,10 @@ class MoleculeEnv:
             Chem.SanitizeMol(mol)
             smiles = Chem.MolToSmiles(mol, canonical=True)
             if "." in smiles:
-                return None, 0.0
+                fallback = "".join(ATOM_TYPES[a] for a in atoms if a != 0)
+                return (fallback if fallback else None), (1.0 if fallback else 0.0)
             return smiles, 1.0
         except Exception:
-            return None, 0.0
+            # Fallback: simple string of atoms if RDKit fails
+            fallback = "".join(ATOM_TYPES[a] for a in atoms if a != 0)
+            return (fallback if fallback else None), (1.0 if fallback else 0.0)
