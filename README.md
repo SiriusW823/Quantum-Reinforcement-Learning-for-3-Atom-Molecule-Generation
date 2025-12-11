@@ -34,7 +34,7 @@ If CUDA-Q/QMG is needed, install your CUDA-Q stack and implement `build_qmg_prio
 ## Run
 ```bash
 conda activate qmg
-python "Quantum Reinforcement Learning for 3-Atom Molecule Generation.py"
+python train.py
 ```
 
 ## Key Tunables (in `reinforce_training`)

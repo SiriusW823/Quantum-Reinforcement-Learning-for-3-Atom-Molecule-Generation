@@ -22,6 +22,7 @@ import sys
 from dataclasses import dataclass
 from typing import Callable, List, Optional, Sequence, Tuple
 import numpy as np
+import matplotlib.pyplot as plt
 
 # Avoid OpenMP runtime conflicts (libomp vs libiomp) often seen on Windows with PyTorch/RDKit.
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
@@ -200,7 +201,7 @@ def build_pennylane_prior() -> Optional[Callable[[str], float]]:
             pl_ham = qml.Hamiltonian(coeffs, ops)
             energy = vqe_energy(pl_ham, n_qubits)
             # Map energy to a bounded positive score; lower energy -> higher score.
-            score = max(0.05, min(2.5, math.exp(-energy / 5.0)))
+            score = max(0.05, min(3.0, math.exp(-energy / 5.0)))
             cache[smiles] = score
             return score
         except Exception:
@@ -344,6 +345,10 @@ def reinforce_training(
     rewards: List[float] = []
     valid_count = 0
     batch_losses: List[torch.Tensor] = []
+    history_steps: List[int] = []
+    history_valid_ratio: List[float] = []
+    history_unique_ratio: List[float] = []
+    history_combo: List[float] = []
     for ep in range(1, episodes + 1):
         atoms, bonds, log_prob, entropy = sample_action(policy, temperature=temperature)
         smiles, valid = atoms_bonds_to_smiles(atoms, bonds)
@@ -361,7 +366,7 @@ def reinforce_training(
         if valid and unique:
             reward = quantum_bias
         elif valid and not unique:
-            reward = -0.02
+            reward = -0.01
         else:
             reward = 0.0
         rewards.append(reward)
@@ -394,6 +399,12 @@ def reinforce_training(
         # Cool down temperature to shift from exploration to exploitation.
         temperature = max(min_temperature, temperature * temp_decay)
 
+        # Track ratios for convergence plotting
+        history_steps.append(ep)
+        history_valid_ratio.append(valid_count / ep)
+        history_unique_ratio.append(len(seen_smiles) / ep)
+        history_combo.append(history_valid_ratio[-1] * history_unique_ratio[-1])
+
     # Flush any remaining gradients
     if batch_losses:
         optimizer.zero_grad()
@@ -407,10 +418,30 @@ def reinforce_training(
     print(f"Valid count: {valid_count} | Unique valid: {len(discovered)}")
     if rewards:
         print(f"Reward max: {max(rewards):.3f} | mean: {sum(rewards)/len(rewards):.3f}")
+    if history_steps:
+        combo_final = history_combo[-1]
+        print(f"(Valid/Samples)*(Unique/Samples): {combo_final:.4f}")
     print("Top candidate:", best_smiles, "reward=", round(best_reward, 3))
     print("Confirmed unique valid SMILES:")
     for s in discovered:
         print("  ", s)
+
+    # Convergence plot
+    try:
+        plt.figure(figsize=(8, 4))
+        plt.plot(history_steps, history_valid_ratio, label="valid/samples")
+        plt.plot(history_steps, history_unique_ratio, label="unique/samples")
+        plt.plot(history_steps, history_combo, label="(valid/samples)*(unique/samples)")
+        plt.xlabel("Episode")
+        plt.ylabel("Ratio")
+        plt.title("Convergence")
+        plt.legend()
+        plt.tight_layout()
+        plt.savefig("convergence.png", dpi=150)
+        print("Saved convergence plot to convergence.png")
+    except Exception as e:
+        print("Plotting failed:", e)
+
     return discovered
 
 
