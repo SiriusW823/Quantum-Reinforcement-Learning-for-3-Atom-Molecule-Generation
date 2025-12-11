@@ -81,6 +81,19 @@ def run_episode(agent: QuantumActorCritic, env: MoleculeEnv, seen: set[str]) -> 
 
     while not done:
         action, logp, ent = agent.act(history)
+        # enforce first atom is not NONE (0) to avoid trivial invalid episodes
+        if len(history) == 0:
+            tries = 0
+            while action == 0 and tries < 5:
+                action, logp, ent = agent.act(history)
+                tries += 1
+            if action == 0:
+                action = 1  # fallback to Carbon
+                # recompute distribution/logp/ent for that forced action
+                state_vec = encode_state(history, n_wires=agent.n_wires)
+                dist = agent.policy(state_vec)
+                logp = dist.log_prob(torch.tensor(action))
+                ent = dist.entropy()
         state_vec = encode_state(history, n_wires=agent.n_wires)
         val = agent.value(state_vec)
         history.append(action)
