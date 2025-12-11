@@ -39,7 +39,7 @@ class QuantumConfig:
     geometry_penalty_weight: float = 0.5
     geom_d0: float = 1.2
     geom_sigma: float = 0.4
-    lambda_reward: float = 2.0  # reward scale in exp(-E/λ)
+    lambda_reward: float = 2.0
     knn_k: int = 5
 
 

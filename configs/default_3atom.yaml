@@ -1,0 +1,37 @@
+rl:
+  episodes: 20000
+  lr: 0.02
+  gamma: 0.99
+  entropy_coef: 0.05
+  temperature: 1.5
+  min_temperature: 0.6
+  temp_decay: 0.998
+  batch_size: 16
+  max_grad_norm: 1.0
+  log_interval: 100
+  seed: 7
+
+chem:
+  allowed_atoms: ["C", "N", "O"]
+  num_atoms: 3
+  min_dist2: 0.001
+
+quantum:
+  basis: "sto-3g"
+  target_qubits: 8
+  vqe_layers: 2
+  vqe_steps: 12
+  vqe_lr: 0.1
+  energy_scale: 5.0
+  score_min: 0.05
+  score_max: 3.0
+  valence_penalty_weight: 1.0
+  connectivity_penalty_weight: 1.0
+  geometry_penalty_weight: 0.5
+  geom_d0: 1.2
+  geom_sigma: 0.4
+  lambda_reward: 2.0
+  knn_k: 5
+
+encoder:
+  n_qubits: 8

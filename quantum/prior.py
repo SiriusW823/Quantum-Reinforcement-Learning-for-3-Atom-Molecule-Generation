@@ -8,7 +8,7 @@ from openfermion import QubitOperator  # type: ignore
 from openfermionpyscf import run_pyscf  # type: ignore
 from openfermion.transforms import jordan_wigner  # type: ignore
 
-from chem import (
+from env.chem import (
     ALLOWED_VALENCE,
     distance_matrix,
     embed_geometry,
@@ -50,7 +50,9 @@ def to_pl_hamiltonian(qubit_ham: QubitOperator) -> Tuple[List[float], List[qml.o
     return coeffs, ops
 
 
-def build_quantum_chemistry_hamiltonian(geom: List[Tuple[str, Tuple[float, float, float]]], basis: str, target_qubits: int) -> Optional[Tuple[qml.Hamiltonian, int]]:
+def build_quantum_chemistry_hamiltonian(
+    geom: List[Tuple[str, Tuple[float, float, float]]], basis: str, target_qubits: int
+) -> Optional[Tuple[qml.Hamiltonian, int]]:
     max_orb = max(2, min(target_qubits // 2, 4))
     total_e = sum(_atomic_number(sym) for sym, _ in geom)
     active_e = min(total_e, 2 * max_orb)
@@ -88,7 +90,7 @@ def build_valence_constraint(smiles: str, weight: float) -> Optional[qml.Hamilto
         symbol = atom.GetSymbol()
         allowed = ALLOWED_VALENCE.get(symbol, 4)
         diff = usage[idx] - allowed
-        penalties += weight * (diff ** 2)
+        penalties += weight * (diff**2)
     return qml.Hamiltonian([penalties], [qml.Identity(0)])
 
 
@@ -100,7 +102,9 @@ def build_connectivity_constraint(smiles: str, weight: float) -> Optional[qml.Ha
     return qml.Hamiltonian([penalty], [qml.Identity(0)])
 
 
-def build_geometry_constraint(geom: List[Tuple[str, Tuple[float, float, float]]], weight: float, d0: float, sigma: float) -> Optional[qml.Hamiltonian]:
+def build_geometry_constraint(
+    geom: List[Tuple[str, Tuple[float, float, float]]], weight: float, d0: float, sigma: float
+) -> Optional[qml.Hamiltonian]:
     if not geom:
         return None
     dmat = distance_matrix(geom)
@@ -109,7 +113,7 @@ def build_geometry_constraint(geom: List[Tuple[str, Tuple[float, float, float]]]
     for i in range(n):
         for j in range(i + 1, n):
             dij = dmat[i][j]
-            penalties += weight * math.exp(-((dij - d0) ** 2) / (sigma ** 2))
+            penalties += weight * math.exp(-((dij - d0) ** 2) / (sigma**2))
     return qml.Hamiltonian([penalties], [qml.Identity(0)])
 
 

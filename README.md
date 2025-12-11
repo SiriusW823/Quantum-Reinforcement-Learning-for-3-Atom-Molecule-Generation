@@ -1,63 +1,96 @@
-# Quantum-Guided RL for Molecule Generation (V2 Classical + V3 Quantum)
+## Quantum RL for 3‑Atom Molecule Generation (Fully Quantum Agents)
 
-![Reinforcement Learning Loop](assets/rl-diagram.jpg)
+This repository implements a **fully quantum actor–critic** pipeline for small-molecule generation. The environment is classical (RDKit) for molecule construction/validation, while both the **generator (actor)** and the **helper (critic/prior)** are parametrized quantum circuits (PQCs) built with PennyLane. The objective is to maximize:
 
-This project upgrades a classical RL pipeline into a **Level-5 full-quantum environment** using PennyLane, RDKit, PySCF, OpenFermion, and PyTorch. Both policy and prior are quantum-driven: the agent samples atom/bond sequences via a quantum policy network (QPN), builds SMILES, and the reward blends classical novelty (V2) and quantum signals (V3: quantum novelty + quantum energy prior) to maximize `(valid/samples) * (unique/samples) → 1`.
-
-## Goals
-- Generate valid, unique molecules via REINFORCE.
-- Use full quantum reward:
-  - Quantum novelty via state fidelity.
-  - VQE energy as quantum prior (PySCF → OpenFermion → JW → PennyLane).
-- Combined reward:
-  `reward = valid * novelty_classical * novelty_quantum * quantum_energy_prior`
-
-## Modules
-- **chem.py**: RDKit molecule builder/validity; utilities for valence/connectivity/geometry; qubit estimate.
-- **policy.py**: **Quantum policy network** (PennyLane QNode + StronglyEntanglingLayers) outputs logits for atoms/bonds with masking.
-- **novelty.py**: V2 classical novelty (hash frequency + kNN on Morgan fingerprints).
-- **encoder.py**: SMILES → features → AngleEmbedding angles; provides quantum state encoder.
-- **prior.py**: Quantum module (V3): geometry embedding, quantum Hamiltonian (PySCF→OpenFermion→JW), valence/connectivity/geometry penalties, short VQE, quantum reward.
-- **trainer.py**: Quantum policy gradient (REINFORCE-style) with entropy regularization, temperature annealing, mini-batch updates, logging, convergence plots.
-- **config.py**: Hyperparameters (RL, chemistry, quantum).
-- **train.py**: Entry point wiring everything together.
-
-## Quantum Reward Architecture
-1. **Quantum chemistry**: RDKit geometry → PySCF RHF → OpenFermion fermionic H → JW to qubit H → PennyLane VQE (short run).
-2. **Valence penalty**: Σ β (valence(i) − allowed_valence(i))² as a Hamiltonian term.
-3. **Connectivity penalty**: δ |components − 1| as a Hamiltonian term.
-4. **Geometry penalty**: Σ γ exp(−(d_ij − d0)² / σ²) as a Hamiltonian term.
-5. **Quantum novelty**: based on quantum state fidelity (state buffer via encoder; novelty = 1 − avg fidelity).
-6. **Combined reward**: `reward = valid * novelty_classical * novelty_quantum * quantum_energy_prior`, where `quantum_energy_prior = exp(−E/λ)` (E = VQE energy + penalties).
-
-## Default Chemical Space
-- Chain of 5 heavy atoms (`C, N, O`), bonds `NONE/Single/Double/Triple` along 0–1–2–3–4.
-
-## Config (config.py)
-- RL: episodes=20000, lr=0.02, entropy=0.05, temperature=1.5, temp_decay=0.998, min_temp=0.6, batch_size=16.
-- Chemistry: allowed atoms, chain length, distance filter.
-- Quantum: basis (sto-3g), target_qubits (active space 4–8), VQE layers/steps/step-size, penalty weights, λ for reward scaling.
-
-## Install (WSL/Linux recommended)
-```bash
-conda create -n qmg python=3.10 rdkit pytorch cpuonly numpy=1.26.4 h5py=3.10 -c conda-forge -c pytorch -y
-conda activate qmg
-pip install --no-cache-dir pennylane pyscf openfermion openfermionpyscf matplotlib
+```
+valid_ratio = valid_count  / samples
+unique_ratio = unique_valid / samples
+target_metric = valid_ratio * unique_ratio  → 1
 ```
 
-## Run
-```bash
-conda activate qmg
-python train.py
+### Key Components
+- **Environment (classical, RDKit):** builds SMILES from sampled atoms/bonds, enforces connectivity, tracks validity/uniqueness.
+- **Quantum Generator (actor):** PQC (AngleEmbedding + StronglyEntanglingLayers) outputs logits for atom and bond choices; trained via policy gradient with parameter-shift.
+- **Quantum Helper (critic/prior):** PQC mapping SMILES fingerprints to a scalar value, shaping reward; optional VQE-based chemistry prior (PySCF + OpenFermion + PennyLane) for physical energy bias.
+- **Reward:** default `reward = valid ? novelty_classical * novelty_quantum * quantum_prior : -0.02 (if repeated) or 0 (if invalid)`, then scaled by `(1 + critic_value)`. Novelty includes hash + kNN (classical) and a quantum fidelity proxy.
+
+### Project Structure
+```
+agents/
+  quantum_policy.py      # PQC actor
+  quantum_helper.py      # PQC critic/prior
+configs/
+  config.py              # Python config (default)
+  default_3atom.yaml     # YAML snapshot of defaults
+env/
+  chem.py                # RDKit atom/bond utils, geometry, valence helpers
+  molecule_env.py        # Environment wrapper with counters
+quantum/
+  encoder.py             # SMILES→state encoder (AngleEmbedding)
+  encodings.py           # Feature encodings (counts + FP)
+  pqc_blocks.py          # Reusable PQC builders
+  prior.py               # Optional VQE prior (PySCF + OpenFermion + PennyLane)
+training/
+  loop.py                # Actor–critic training loop
+  novelty.py             # Classical novelty (hash + kNN)
+  utils.py               # Plotting utilities
+scripts/
+  train_3atom_full_quantum.py  # Entry point
+LICENSE
+README.md
 ```
 
-## Outputs
-- Logs every 100 steps: reward, valid/unique, novelty (classical/quantum), quantum prior, atoms/bonds, temp, entropy, SMILES.
-- Final summary: samples, valid, unique, reward stats, (valid/samples)*(unique/samples), best SMILES, unique list.
-- `convergence.png`: valid/samples, unique/samples, their product.
+### Installation (example, conda)
+```bash
+# Create env (Python ≥3.11)
+conda create -n qrl python=3.11 rdkit -c conda-forge -y
+conda activate qrl
 
-## Extending
-- Expand atoms/bonds or chain length in `config.py`.
-- Implement true quantum novelty via encoder states and fidelity in `prior.py`.
-- Adjust active space/qubits, penalties, λ, and VQE settings for speed/accuracy trade-offs.
-- Swap ansatz or integrate CUDA-Q/QMG in `prior.py` if available.
+# Install core packages
+pip install torch pennylane pyscf openfermion openfermionpyscf matplotlib
+```
+> If PySCF/OpenFermion wheels are unavailable on your platform, install via conda-forge or prebuilt wheels as appropriate.
+
+### Training
+Run the full quantum actor–critic (defaults for 3 atoms):
+```bash
+python scripts/train_3atom_full_quantum.py
+```
+Optional flag to disable the VQE prior:
+```bash
+python scripts/train_3atom_full_quantum.py --quantum-prior
+```
+(flag present; defaults to enabled)
+
+Outputs:
+- Console logs every `log_interval` episodes.
+- `convergence.png` plotting valid/samples, unique/samples, and their product.
+
+### Configuration
+- Python defaults: `configs/config.py`
+- YAML snapshot: `configs/default_3atom.yaml` (not auto-loaded; provided for reference/versioning)
+
+Key knobs:
+- `chem.allowed_atoms`, `chem.num_atoms` (default 3 heavy atoms: C/N/O)
+- `rl.*` (episodes, lr, temperature schedule, entropy coef, batch size)
+- `quantum.*` (VQE prior settings, penalty weights, target qubits)
+- `encoder.n_qubits` (for quantum encoding)
+
+### How It Works (Pipeline)
+1. **Actor PQC** samples atoms/bonds → candidate molecule.
+2. **Environment (RDKit)** builds and sanitizes SMILES, checks connectivity, updates validity/uniqueness stats.
+3. **Novelty & Prior**
+   - Classical novelty: frequency-based hash + kNN on fingerprints.
+   - Quantum novelty: fidelity proxy on embedded states.
+   - Quantum prior: optional VQE energy score from PySCF/OpenFermion → PennyLane.
+4. **Critic PQC** evaluates SMILES features → scalar value.
+5. **Reward** combines validity, novelty, prior, and critic bonus; gradients flow via parameter-shift to both actor and critic.
+6. Metrics tracked: valid_ratio, unique_ratio, target_metric, convergence plot saved.
+
+### Notes and Limits
+- Environment stays classical (RDKit) by design; all learning components are quantum PQCs.
+- VQE prior is CPU-only and approximate; disable via `--quantum-prior` if too slow.
+- Qubit counts are kept modest (4–8) for tractability on CPU simulators.
+
+### License
+See `LICENSE` (unchanged).

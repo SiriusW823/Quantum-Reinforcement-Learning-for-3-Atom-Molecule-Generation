@@ -2,7 +2,7 @@ from typing import List, Tuple
 import torch
 import torch.nn as nn
 import pennylane as qml
-import numpy as np
+from quantum.pqc_blocks import make_torch_pqc
 
 
 class QuantumPolicyNet(nn.Module):
@@ -20,26 +20,17 @@ class QuantumPolicyNet(nn.Module):
         self.num_atoms_in_chain = num_atoms_in_chain
         self.num_bonds_in_chain = num_atoms_in_chain - 1
         self.n_wires = n_wires
-        self.dev = qml.device("default.qubit", wires=self.n_wires)
-        weight_shape = qml.StronglyEntanglingLayers.shape(n_layers=layers, n_wires=self.n_wires)
-        self.params = nn.Parameter(torch.zeros(weight_shape))
+        self.pqc = make_torch_pqc(n_wires=n_wires, layers=layers)
         self.head_atoms = nn.ModuleList([nn.Linear(self.n_wires, n_atoms) for _ in range(self.num_atoms_in_chain)])
         self.head_bonds = nn.ModuleList([nn.Linear(self.n_wires, n_bonds) for _ in range(self.num_bonds_in_chain)])
 
-        @qml.qnode(self.dev, interface="torch")
-        def circuit(weights, angles):
-            qml.AngleEmbedding(angles, wires=list(range(self.n_wires)))
-            qml.StronglyEntanglingLayers(weights, wires=list(range(self.n_wires)))
-            return [qml.expval(qml.PauliZ(i)) for i in range(self.n_wires)]
-
-        self.circuit = circuit
-
-    def forward(self, angles: torch.Tensor, temperature: float = 1.0) -> Tuple[List[torch.distributions.Categorical], List[torch.distributions.Categorical]]:
+    def forward(
+        self, angles: torch.Tensor, temperature: float = 1.0
+    ) -> Tuple[List[torch.distributions.Categorical], List[torch.distributions.Categorical]]:
         """
         angles: tensor of shape (n_wires,) produced from e.g., dummy constant or time step; here we use zeros.
         """
-        expvals = self.circuit(self.params, angles)
-        expvals = torch.stack(expvals).float()  # shape (n_wires,)
+        expvals = self.pqc(angles).float()  # shape (n_wires,)
         atom_logits = [head(expvals) / temperature for head in self.head_atoms]
         bond_logits = [head(expvals) / temperature for head in self.head_bonds]
         atom_dists = [torch.distributions.Categorical(logits=logits) for logits in atom_logits]
@@ -57,7 +48,9 @@ def mask_bond_logits(bond_logits: torch.Tensor, atom_i: int, atom_j: int, allowe
     return bond_logits + mask
 
 
-def sample_action(policy: QuantumPolicyNet, allowed_atoms: List[str], temperature: float = 1.0) -> Tuple[Tuple[int, ...], Tuple[int, ...], torch.Tensor, torch.Tensor]:
+def sample_action(
+    policy: QuantumPolicyNet, allowed_atoms: List[str], temperature: float = 1.0
+) -> Tuple[Tuple[int, ...], Tuple[int, ...], torch.Tensor, torch.Tensor]:
     max_order_map = {"C": 3, "N": 3, "O": 2}  # limit bonds: O no triple
     angles = torch.zeros(policy.n_wires, dtype=torch.float32)
     atom_dists, bond_dists = policy.forward(angles, temperature=temperature)
