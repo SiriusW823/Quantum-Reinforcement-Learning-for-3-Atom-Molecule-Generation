@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Sequence, Optional
+from typing import Sequence
 
 
 @dataclass
@@ -27,7 +27,12 @@ class QuantumConfig:
     energy_scale: float = 5.0  # used in exp(-E/energy_scale)
     score_min: float = 0.05
     score_max: float = 3.0
-    use_cudaq_prior: bool = False  # placeholder hook
+    valence_penalty_weight: float = 1.0
+    connectivity_penalty_weight: float = 1.0
+    geometry_penalty_weight: float = 0.5
+    geom_d0: float = 1.2  # reference distance in Angstrom
+    geom_sigma: float = 0.4
+    lambda_reward_scale: float = 2.0  # λ in reward exp(-E/λ)
 
 
 @dataclass

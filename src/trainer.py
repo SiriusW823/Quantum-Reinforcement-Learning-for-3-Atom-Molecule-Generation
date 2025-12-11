@@ -1,19 +1,12 @@
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import List, Optional
 import math
 import matplotlib.pyplot as plt
 import torch
 import torch.optim as optim
 
 from . import config
-from .chem import (
-    BOND_LABELS,
-    BOND_TYPES,
-    atoms_bonds_to_smiles,
-    embed_geometry,
-    estimate_qubits,
-    set_seed,
-)
+from .chem import BOND_LABELS, BOND_TYPES, atoms_bonds_to_smiles, set_seed
 from .policy import PolicyNet, sample_action
 from .prior import build_quantum_prior
 
@@ -46,6 +39,11 @@ class Trainer:
             energy_scale=q_cfg.energy_scale,
             score_min=q_cfg.score_min,
             score_max=q_cfg.score_max,
+            valence_weight=q_cfg.valence_penalty_weight,
+            connectivity_weight=q_cfg.connectivity_penalty_weight,
+            geometry_weight=q_cfg.geometry_penalty_weight,
+            geom_d0=q_cfg.geom_d0,
+            geom_sigma=q_cfg.geom_sigma,
         )
 
         policy = PolicyNet(
@@ -69,7 +67,7 @@ class Trainer:
         for ep in range(1, rl_cfg.episodes + 1):
             atoms, bonds, log_prob, entropy = sample_action(policy, temperature=temperature)
             smiles, valid = atoms_bonds_to_smiles(atoms, bonds, chem_cfg.allowed_atoms)
-            if valid and smiles and "." in smiles:
+            if valid and smiles and "." in smiles and not chem_cfg.allow_disconnected:
                 valid = 0.0
             valid_count += int(valid)
 
@@ -78,9 +76,11 @@ class Trainer:
                 seen_smiles.add(smiles)
                 discovered.append(smiles)
 
-            quantum_bias = prior_fn(smiles) if smiles else 0.0
+            # Quantum energy and reward
+            quantum_energy = prior_fn(smiles) if smiles else 0.0
+            quantum_score = math.exp(-quantum_energy / q_cfg.lambda_reward_scale) if valid and smiles else 0.0
             if valid and unique:
-                reward = quantum_bias
+                reward = quantum_score
             elif valid and not unique:
                 reward = -0.01
             else:
@@ -107,7 +107,7 @@ class Trainer:
             if ep % rl_cfg.log_interval == 0:
                 print(
                     f"[ep {ep:04d}] reward={reward:.3f} valid={valid:.0f} unique={unique:.0f} "
-                    f"bias={quantum_bias:.3f} atoms={[chem_cfg.allowed_atoms[a] for a in atoms]} "
+                    f"E={quantum_energy:.3f} atoms={[chem_cfg.allowed_atoms[a] for a in atoms]} "
                     f"bonds={[BOND_LABELS[BOND_TYPES[b]] for b in bonds]} temp={temperature:.2f} "
                     f"H={entropy.item():.2f} smiles={smiles}"
                 )

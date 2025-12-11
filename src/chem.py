@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 import random
 import torch
 
@@ -29,6 +29,13 @@ BOND_LABELS = {
     BondType.DOUBLE: "D",
     BondType.TRIPLE: "T",
 }
+BOND_ORDER = {
+    None: 0,
+    BondType.SINGLE: 1,
+    BondType.DOUBLE: 2,
+    BondType.TRIPLE: 3,
+}
+ALLOWED_VALENCE: Dict[str, int] = {"C": 4, "N": 3, "O": 2}
 
 
 def set_seed(seed: int) -> None:
@@ -85,3 +92,62 @@ def embed_geometry(smiles: str, min_dist2: float = 1e-3) -> Optional[List[Tuple[
 
 def estimate_qubits(num_atoms: int) -> int:
     return 2 * num_atoms + 2 * (num_atoms * (num_atoms - 1) // 2)
+
+
+def bond_matrix_from_smiles(smiles: str) -> Optional[List[List[int]]]:
+    mol = Chem.MolFromSmiles(smiles)
+    if mol is None:
+        return None
+    n = mol.GetNumAtoms()
+    mat = [[0 for _ in range(n)] for _ in range(n)]
+    for bond in mol.GetBonds():
+        i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+        order = int(bond.GetBondTypeAsDouble())
+        mat[i][j] = mat[j][i] = order
+    return mat
+
+
+def valence_usage(smiles: str) -> Optional[List[int]]:
+    mat = bond_matrix_from_smiles(smiles)
+    if mat is None:
+        return None
+    n = len(mat)
+    usage = [0 for _ in range(n)]
+    for i in range(n):
+        usage[i] = sum(mat[i])
+    return usage
+
+
+def connectivity_components(smiles: str) -> int:
+    mat = bond_matrix_from_smiles(smiles)
+    if mat is None:
+        return 0
+    n = len(mat)
+    visited = [False] * n
+    comp = 0
+
+    def dfs(u: int) -> None:
+        visited[u] = True
+        for v, w in enumerate(mat[u]):
+            if w > 0 and not visited[v]:
+                dfs(v)
+
+    for i in range(n):
+        if not visited[i]:
+            comp += 1
+            dfs(i)
+    return comp
+
+
+def distance_matrix(geom: List[Tuple[str, Tuple[float, float, float]]]) -> List[List[float]]:
+    n = len(geom)
+    dmat = [[0.0 for _ in range(n)] for _ in range(n)]
+    coords = [c for _, c in geom]
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = coords[i][0] - coords[j][0]
+            dy = coords[i][1] - coords[j][1]
+            dz = coords[i][2] - coords[j][2]
+            d = (dx * dx + dy * dy + dz * dz) ** 0.5
+            dmat[i][j] = dmat[j][i] = d
+    return dmat
