@@ -39,7 +39,7 @@ class QuantumPolicyNet(nn.Module):
         angles: tensor of shape (n_wires,) produced from e.g., dummy constant or time step; here we use zeros.
         """
         expvals = self.circuit(self.params, angles)
-        expvals = torch.stack(expvals)  # shape (n_wires,)
+        expvals = torch.stack(expvals).float()  # shape (n_wires,)
         atom_logits = [head(expvals) / temperature for head in self.head_atoms]
         bond_logits = [head(expvals) / temperature for head in self.head_bonds]
         atom_dists = [torch.distributions.Categorical(logits=logits) for logits in atom_logits]
@@ -59,7 +59,7 @@ def mask_bond_logits(bond_logits: torch.Tensor, atom_i: int, atom_j: int, allowe
 
 def sample_action(policy: QuantumPolicyNet, allowed_atoms: List[str], temperature: float = 1.0) -> Tuple[Tuple[int, ...], Tuple[int, ...], torch.Tensor, torch.Tensor]:
     max_order_map = {"C": 3, "N": 3, "O": 2}  # limit bonds: O no triple
-    angles = torch.zeros(policy.n_wires)
+    angles = torch.zeros(policy.n_wires, dtype=torch.float32)
     atom_dists, bond_dists = policy.forward(angles, temperature=temperature)
     atoms = []
     bonds = []
