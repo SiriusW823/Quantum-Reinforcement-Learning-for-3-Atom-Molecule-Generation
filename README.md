@@ -5,7 +5,7 @@
 Reinforcement-learning (REINFORCE) agent that samples three heavy atoms and two bonds, builds candidate molecules with RDKit, and scores them with a quantum prior. The default prior uses PySCF + OpenFermion (Jordan–Wigner) to produce a qubit Hamiltonian and runs a short PennyLane VQE to obtain an energy proxy; a CUDA-Q/QMG hook is available for alternative backends. Objective: maximize `reward = validity × uniqueness × quantum_prior`.
 
 ## Overview
-- **Chemical space**: atoms = (`C, N, O`); bonds = `NONE / Single / Double / Triple`; chain topology 0–1–2.
+- **Chemical space**: atoms = (`C, N, O`); bonds = `NONE / Single / Double / Triple`; chain topology of 5 atoms (0–1–2–3–4).
 - **Quantum prior**: PySCF (sto-3g) HF integrals → OpenFermion fermionic Hamiltonian → JW to qubit Hamiltonian → PennyLane VQE (`StronglyEntanglingLayers`) → energy → score.
 - **RL**: entropy-regularized REINFORCE with temperature annealing, mini-batch updates, gradient clipping; 20k episodes by default.
 - **Filtering**: rejects disconnected SMILES and overlapping geometries; duplicates incur a small penalty to push diversity.

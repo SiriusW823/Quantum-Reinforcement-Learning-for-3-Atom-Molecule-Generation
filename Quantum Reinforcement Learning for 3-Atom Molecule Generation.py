@@ -1,7 +1,7 @@
 """
-Quantum RL for 3-atom heavy-atom molecules.
+Quantum RL for 5-atom heavy-atom molecules.
 
-- Samples 3 heavy atoms and 2 bonds (1-2, 2-3), converts to SMILES with RDKit.
+- Samples 5 heavy atoms and 4 bonds in a chain, converts to SMILES with RDKit.
 - Reward = validity * uniqueness * quantum_prior (default PennyLane toy circuit; replace with real chemistry model), targeting 1.0 for valid+novel+good prior.
 - Policy optimized with REINFORCE. Quantum prior hook (PennyLane/cudaq/QMG) is pluggable where noted.
 
@@ -50,11 +50,11 @@ except ImportError as exc:
     ) from exc
 
 # Allowed heavy atoms; hydrogens are implicit. Kept small for focused training.
-ALLOWED_ATOMS: Sequence[str] = (
-    "C",
-    "N",
-    "O",
-)
+ALLOWED_ATOMS: Sequence[str] = ("C", "N", "O")
+
+# Chain length (number of heavy atoms) and bonds
+NUM_ATOMS_IN_CHAIN = 5
+NUM_BONDS_IN_CHAIN = NUM_ATOMS_IN_CHAIN - 1
 # Bond types considered between atom1-atom2 and atom2-atom3; None means no bond.
 BOND_TYPES: Sequence[Optional[rdchem.BondType]] = (
     None,
@@ -228,14 +228,14 @@ def set_seed(seed: int = 42) -> None:
 
 @dataclass
 class SampledMolecule:
-    atoms: Tuple[int, int, int]
-    bonds: Tuple[int, int]
+    atoms: Tuple[int, ...]
+    bonds: Tuple[int, ...]
     smiles: Optional[str]
     valid: float
 
 
 def atoms_bonds_to_smiles(atom_ids: Sequence[int], bond_ids: Sequence[int]) -> Tuple[Optional[str], float]:
-    """Build a 3-atom chain molecule and return canonical SMILES and validity flag."""
+    """Build a chain molecule and return canonical SMILES and validity flag."""
     mol = Chem.RWMol()
     try:
         atom_indices = []
@@ -243,11 +243,9 @@ def atoms_bonds_to_smiles(atom_ids: Sequence[int], bond_ids: Sequence[int]) -> T
             symbol = ALLOWED_ATOMS[atom_id]
             atom_indices.append(mol.AddAtom(Chem.Atom(symbol)))
 
-        # Connect as a simple chain: 0-1 and 1-2
-        for (a_idx, b_idx, bond_id) in (
-            (atom_indices[0], atom_indices[1], bond_ids[0]),
-            (atom_indices[1], atom_indices[2], bond_ids[1]),
-        ):
+        # Connect as a simple chain: i-(i+1)
+        for i, bond_id in enumerate(bond_ids):
+            a_idx, b_idx = atom_indices[i], atom_indices[i + 1]
             bond_type = BOND_TYPES[bond_id]
             if bond_type is None:
                 continue  # skip bond
@@ -269,8 +267,8 @@ class PolicyNet(nn.Module):
             nn.Linear(1, hidden),  # dummy input to keep graph simple
             nn.ReLU(),
         )
-        self.atom_heads = nn.ModuleList([nn.Linear(hidden, n_atoms) for _ in range(3)])
-        self.bond_heads = nn.ModuleList([nn.Linear(hidden, n_bonds) for _ in range(2)])
+        self.atom_heads = nn.ModuleList([nn.Linear(hidden, n_atoms) for _ in range(NUM_ATOMS_IN_CHAIN)])
+        self.bond_heads = nn.ModuleList([nn.Linear(hidden, n_bonds) for _ in range(NUM_BONDS_IN_CHAIN)])
 
     def distributions(self, temperature: float = 1.0) -> Tuple[List[torch.distributions.Categorical], List[torch.distributions.Categorical]]:
         x = self.shared(torch.ones(1, 1))
@@ -279,7 +277,7 @@ class PolicyNet(nn.Module):
         return atom_dists, bond_dists
 
 
-def sample_action(policy: PolicyNet, temperature: float = 1.0) -> Tuple[Tuple[int, int, int], Tuple[int, int], torch.Tensor, torch.Tensor]:
+def sample_action(policy: PolicyNet, temperature: float = 1.0) -> Tuple[Tuple[int, ...], Tuple[int, ...], torch.Tensor, torch.Tensor]:
     atom_dists, bond_dists = policy.distributions(temperature=temperature)
     atoms = []
     bonds = []
@@ -297,7 +295,7 @@ def sample_action(policy: PolicyNet, temperature: float = 1.0) -> Tuple[Tuple[in
         entropies.append(dist.entropy())
     total_log_prob = torch.stack(log_probs).sum()
     total_entropy = torch.stack(entropies).sum()
-    return (atoms[0], atoms[1], atoms[2]), (bonds[0], bonds[1]), total_log_prob, total_entropy
+    return tuple(atoms), tuple(bonds), total_log_prob, total_entropy
 
 
 def quantum_prior_score(smiles: Optional[str], prior_fn: Optional[Callable[[str], float]] = None) -> float:
@@ -423,7 +421,7 @@ def main() -> None:
     if prior_fn is None:
         prior_fn = build_qmg_prior()
 
-    print("Estimated qubits for 3 heavy atoms:", estimate_qubits(3))
+    print("Estimated qubits for 5 heavy atoms:", estimate_qubits(NUM_ATOMS_IN_CHAIN))
     # Adjust episodes upward for better exploration; here we run longer with higher entropy.
     reinforce_training(
         episodes=20000,          # stronger training
