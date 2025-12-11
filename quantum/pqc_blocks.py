@@ -12,6 +12,7 @@ def make_torch_pqc(n_wires: int, layers: int):
     dev = qml.device("default.qubit", wires=n_wires)
     weight_shapes = {"weights": qml.StronglyEntanglingLayers.shape(n_layers=layers, n_wires=n_wires)}
 
+    @qml.qnode(dev, interface="torch")
     def qnode(inputs, weights):
         qml.AngleEmbedding(inputs, wires=range(n_wires))
         qml.StronglyEntanglingLayers(weights, wires=range(n_wires))
