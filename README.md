@@ -1,36 +1,42 @@
-# Quantum-Guided RL for Molecule Generation (Level-2 Quantum Environment)
+# Quantum-Guided RL for Molecule Generation (V2 Classical + V3 Quantum)
 
 ![Reinforcement Learning Loop](assets/rl-diagram.jpg)
 
-Classical REINFORCE policy with a **quantum-informed environment**. The agent samples atom/bond sequences; RDKit builds candidate molecules; the reward is dominated by a PennyLane quantum Hamiltonian that combines:
-- **Quantum chemistry energy** (PySCF → OpenFermion → JW → PennyLane VQE, active space 4–8 qubits)
-- **Valence penalty** (deviation from allowed valence)
-- **Connectivity penalty** (enforce a single component)
-- **Geometry penalty** (soft penalty on unphysical distances)
+This project upgrades a classical RL pipeline into a Level-2 quantum-informed environment using PennyLane, RDKit, PySCF, OpenFermion, and PyTorch. The agent samples atom/bond sequences to build SMILES; the reward blends classical novelty (V2) and quantum signals (V3: quantum novelty + quantum energy prior) to maximize `(valid/samples) * (unique/samples) → 1`.
 
-Reward: `reward = exp(-E_total / λ) * rdkit_valid * uniqueness`, driving `(Valid/Samples)*(Unique/Samples)` toward 1.
+## Goals
+- Generate valid, unique molecules via REINFORCE.
+- Use full quantum reward:
+  - Quantum novelty via state fidelity.
+  - VQE energy as quantum prior (PySCF → OpenFermion → JW → PennyLane).
+- Combined reward:
+  `reward = valid * novelty_classical * novelty_quantum * quantum_energy_prior`
 
-## Architecture
-- **chem.py**: RDKit build/embedding, bond/valence/connectivity utilities, qubit estimate.
-- **prior.py**: PySCF integrals → OpenFermion fermionic H → JW → qubit H; adds valence/connectivity/geometry penalty Hamiltonians; short PennyLane VQE returns energy.
-- **policy.py**: Classical factorized policy (atoms/bonds) with temperature/entropy control.
-- **trainer.py**: REINFORCE loop, mini-batch updates, entropy regularization, temperature annealing, reward as above; convergence plotting.
-- **config.py**: RL hyperparameters, chemistry space, quantum/VQE settings, penalty weights.
+## Modules
+- **chem.py**: RDKit molecule builder/validity; utilities for valence/connectivity/geometry; qubit estimate.
+- **policy.py**: Classical policy (feed-forward) for atoms/bonds; Categorical sampling with temperature/entropy.
+- **novelty.py**: V2 classical novelty (hash frequency + kNN on Morgan fingerprints).
+- **encoder.py**: SMILES → features → AngleEmbedding angles; provides quantum state encoder.
+- **prior.py**: Quantum module (V3): geometry embedding, quantum Hamiltonian (PySCF→OpenFermion→JW), valence/connectivity/geometry penalties, short VQE, quantum reward.
+- **trainer.py**: REINFORCE loop with entropy regularization, temperature annealing, mini-batch updates, logging, convergence plots.
+- **config.py**: Hyperparameters (RL, chemistry, quantum).
 - **train.py**: Entry point wiring everything together.
+
+## Quantum Reward Architecture
+1. **Quantum chemistry**: RDKit geometry → PySCF RHF → OpenFermion fermionic H → JW to qubit H → PennyLane VQE (short run).
+2. **Valence penalty**: Σ β (valence(i) − allowed_valence(i))² as a Hamiltonian term.
+3. **Connectivity penalty**: δ |components − 1| as a Hamiltonian term.
+4. **Geometry penalty**: Σ γ exp(−(d_ij − d0)² / σ²) as a Hamiltonian term.
+5. **Quantum novelty**: based on quantum state fidelity (placeholder uses classical novelty proxy; extend via encoder states).
+6. **Combined reward**: `reward = valid * novelty_classical * novelty_quantum * quantum_energy_prior`, where `quantum_energy_prior = exp(−E/λ)` (E = VQE energy + penalties).
 
 ## Default Chemical Space
 - Chain of 5 heavy atoms (`C, N, O`), bonds `NONE/Single/Double/Triple` along 0–1–2–3–4.
 
-## Quantum Prior (Level-2)
-1. RDKit ETKDG + UFF geometry (reject fragments/overlaps).
-2. PySCF RHF (sto-3g) → OpenFermion fermionic Hamiltonian.
-3. Jordan–Wigner → qubit Hamiltonian (active space capped by `target_qubits`, default 8).
-4. Penalties as Pauli sums (Identity terms):
-   - Valence: Σ β (valence_i − allowed_i)²
-   - Connectivity: δ |components − 1|
-   - Geometry: Σ γ exp(−(d_ij − d0)² / σ²)
-5. PennyLane VQE (StronglyEntanglingLayers, few steps) on CPU.
-6. Energy → reward via `exp(-E_total / λ)`.
+## Config (config.py)
+- RL: episodes=20000, lr=0.02, entropy=0.05, temperature=1.5, temp_decay=0.998, min_temp=0.6, batch_size=16.
+- Chemistry: allowed atoms, chain length, distance filter.
+- Quantum: basis (sto-3g), target_qubits (active space 4–8), VQE layers/steps/step-size, penalty weights, λ for reward scaling.
 
 ## Install (WSL/Linux recommended)
 ```bash
@@ -45,21 +51,13 @@ conda activate qmg
 python train.py
 ```
 
-## Key Config (see `src/config.py`)
-- RL: `episodes` (20000), `lr`, `entropy_coef`, `temperature`/`temp_decay`/`min_temperature`, `batch_size`, `max_grad_norm`.
-- Chemistry: `allowed_atoms`, `num_atoms_in_chain`, `min_dist2`.
-- Quantum: `basis`, `target_qubits` (active space), VQE `layers/steps/stepsize`, penalty weights (`valence_penalty_weight`, `connectivity_penalty_weight`, `geometry_penalty_weight`, `geom_d0`, `geom_sigma`), `lambda_reward_scale`.
-
 ## Outputs
-- Console log every 50 steps (reward, valid/unique, energy, atoms/bonds, temp, entropy, SMILES).
-- Final summary: samples, valid, unique, reward stats, `(Valid/Samples)*(Unique/Samples)`, best SMILES, full unique list.
-- `convergence.png`: curves for valid/samples, unique/samples, and their product.
+- Logs every 100 steps: reward, valid/unique, novelty (classical/quantum), quantum prior, atoms/bonds, temp, entropy, SMILES.
+- Final summary: samples, valid, unique, reward stats, (valid/samples)*(unique/samples), best SMILES, unique list.
+- `convergence.png`: valid/samples, unique/samples, their product.
 
-## Customization
-- Expand atom/bond vocab or chain length via `config.chem`.
-- Adjust active space/qubits, basis, VQE steps in `config.quantum`.
-- Tune penalties and λ to balance validity vs uniqueness.
-- Swap ansatz or add CUDA-Q/QMG by implementing `build_qmg_prior`.
-
-## License
-All rights reserved. No permission is granted to use, copy, modify, or distribute this work without explicit written consent from the author.
+## Extending
+- Expand atoms/bonds or chain length in `config.py`.
+- Implement true quantum novelty via encoder states and fidelity in `prior.py`.
+- Adjust active space/qubits, penalties, λ, and VQE settings for speed/accuracy trade-offs.
+- Swap ansatz or integrate CUDA-Q/QMG in `prior.py` if available.

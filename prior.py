@@ -8,7 +8,7 @@ from openfermion import QubitOperator  # type: ignore
 from openfermionpyscf import run_pyscf  # type: ignore
 from openfermion.transforms import jordan_wigner  # type: ignore
 
-from .chem import (
+from chem import (
     ALLOWED_VALENCE,
     distance_matrix,
     embed_geometry,
@@ -17,9 +17,15 @@ from .chem import (
 )
 
 
+def _atomic_number(symbol: str) -> int:
+    from rdkit.Chem import GetPeriodicTable
+    pt = GetPeriodicTable()
+    return pt.GetAtomicNumber(symbol)
+
+
 def to_pl_hamiltonian(qubit_ham: QubitOperator) -> Tuple[List[float], List[qml.operation.Operator]]:
     coeffs: List[float] = []
-    ops: List[qml.ops.PauliWord] = []
+    ops: List[qml.operation.Operator] = []
     for term, coeff in qubit_ham.terms.items():
         if len(term) == 0:
             coeffs.append(coeff.real)
@@ -45,7 +51,6 @@ def to_pl_hamiltonian(qubit_ham: QubitOperator) -> Tuple[List[float], List[qml.o
 
 
 def build_quantum_chemistry_hamiltonian(geom: List[Tuple[str, Tuple[float, float, float]]], basis: str, target_qubits: int) -> Optional[Tuple[qml.Hamiltonian, int]]:
-    # target_qubits = 2 * active_orbitals
     max_orb = max(2, min(target_qubits // 2, 4))
     total_e = sum(_atomic_number(sym) for sym, _ in geom)
     active_e = min(total_e, 2 * max_orb)
@@ -155,6 +160,7 @@ def build_quantum_prior(
     geometry_weight: float,
     geom_d0: float,
     geom_sigma: float,
+    lambda_reward: float,
 ) -> Callable[[str], float]:
     cache: dict[str, float] = {}
 
@@ -180,9 +186,3 @@ def build_quantum_prior(
             return 0.0
 
     return prior_fn
-
-
-def _atomic_number(symbol: str) -> int:
-    from rdkit.Chem import GetPeriodicTable
-    pt = GetPeriodicTable()
-    return pt.GetAtomicNumber(symbol)

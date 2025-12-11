@@ -5,10 +5,11 @@ import matplotlib.pyplot as plt
 import torch
 import torch.optim as optim
 
-from . import config
-from .chem import BOND_LABELS, BOND_TYPES, atoms_bonds_to_smiles, set_seed
-from .policy import PolicyNet, sample_action
-from .prior import build_quantum_prior
+import config
+from chem import BOND_LABELS, BOND_TYPES, atoms_bonds_to_smiles, set_seed
+from policy import PolicyNet, sample_action
+from prior import build_quantum_prior
+from novelty import ClassicalNovelty
 
 
 @dataclass
@@ -20,83 +21,93 @@ class History:
 
 
 class Trainer:
-    def __init__(self, config):
-        self.cfg = config
+    def __init__(self):
+        self.rl = config.rl
+        self.chem = config.chem
+        self.q = config.quantum
         self.device = "cpu"
 
     def run(self) -> None:
-        rl_cfg = self.cfg.rl
-        chem_cfg = self.cfg.chem
-        q_cfg = self.cfg.quantum
-
-        set_seed(rl_cfg.seed)
-        prior_fn = build_quantum_prior(
-            basis=q_cfg.basis,
-            target_qubits=q_cfg.target_qubits,
-            layers=q_cfg.vqe_layers,
-            steps=q_cfg.vqe_steps,
-            stepsize=q_cfg.vqe_lr,
-            energy_scale=q_cfg.energy_scale,
-            score_min=q_cfg.score_min,
-            score_max=q_cfg.score_max,
-            valence_weight=q_cfg.valence_penalty_weight,
-            connectivity_weight=q_cfg.connectivity_penalty_weight,
-            geometry_weight=q_cfg.geometry_penalty_weight,
-            geom_d0=q_cfg.geom_d0,
-            geom_sigma=q_cfg.geom_sigma,
-        )
-
+        set_seed(self.rl.seed)
         policy = PolicyNet(
-            n_atoms=len(chem_cfg.allowed_atoms),
+            n_atoms=len(self.chem.allowed_atoms),
             n_bonds=len(BOND_TYPES),
-            num_atoms_in_chain=chem_cfg.num_atoms_in_chain,
+            num_atoms_in_chain=self.chem.num_atoms,
         ).to(self.device)
-        optimizer = optim.Adam(policy.parameters(), lr=rl_cfg.lr)
+        optimizer = optim.Adam(policy.parameters(), lr=self.rl.lr)
         baseline = 0.0
-        seen_smiles: set[str] = set()
-        best_reward = -math.inf
-        best_smiles: Optional[str] = None
+
+        prior_fn = build_quantum_prior(
+            basis=self.q.basis,
+            target_qubits=self.q.target_qubits,
+            layers=self.q.vqe_layers,
+            steps=self.q.vqe_steps,
+            stepsize=self.q.vqe_lr,
+            energy_scale=self.q.energy_scale,
+            score_min=self.q.score_min,
+            score_max=self.q.score_max,
+            valence_weight=self.q.valence_penalty_weight,
+            connectivity_weight=self.q.connectivity_penalty_weight,
+            geometry_weight=self.q.geometry_penalty_weight,
+            geom_d0=self.q.geom_d0,
+            geom_sigma=self.q.geom_sigma,
+            lambda_reward=self.q.lambda_reward,
+        )
+        novelty_cls = ClassicalNovelty(k=self.q.knn_k)
 
         history = History([], [], [], [])
         rewards: List[float] = []
         discovered: List[str] = []
+        seen_smiles: set[str] = set()
         valid_count = 0
         batch_losses: List[torch.Tensor] = []
-        temperature = rl_cfg.temperature
+        temperature = self.rl.temperature
+        best_reward = -math.inf
+        best_smiles: Optional[str] = None
 
-        for ep in range(1, rl_cfg.episodes + 1):
+        for ep in range(1, self.rl.episodes + 1):
             atoms, bonds, log_prob, entropy = sample_action(policy, temperature=temperature)
-            smiles, valid = atoms_bonds_to_smiles(atoms, bonds, chem_cfg.allowed_atoms)
-            if valid and smiles and "." in smiles and not chem_cfg.allow_disconnected:
+            smiles, valid = atoms_bonds_to_smiles(atoms, bonds, self.chem.allowed_atoms)
+            if valid and smiles and "." in smiles and not self.chem.allow_disconnected:
                 valid = 0.0
             valid_count += int(valid)
 
             unique = 1.0 if smiles and smiles not in seen_smiles else 0.0
+            novelty_cls.update(smiles if smiles else "")
+            novelty_classical = novelty_cls.novelty(smiles if smiles else "")
+            novelty_quantum = 0.0
+            quantum_prior = 0.0
+
+            if valid and smiles:
+                quantum_energy = prior_fn(smiles)
+                quantum_prior = max(self.q.score_min, min(self.q.score_max, math.exp(-quantum_energy / self.q.lambda_reward)))
+                # Quantum novelty via placeholder fidelity (extend with encoder states if desired)
+                novelty_quantum = novelty_classical  # placeholder proxy
+
+            reward = (
+                valid
+                * novelty_classical
+                * novelty_quantum
+                * quantum_prior
+            )
+            # Handle uniqueness gating
+            if unique == 0.0:
+                reward *= 0.5
             if unique:
                 seen_smiles.add(smiles)
                 discovered.append(smiles)
-
-            # Quantum energy and reward
-            quantum_energy = prior_fn(smiles) if smiles else 0.0
-            quantum_score = math.exp(-quantum_energy / q_cfg.lambda_reward_scale) if valid and smiles else 0.0
-            if valid and unique:
-                reward = quantum_score
-            elif valid and not unique:
-                reward = -0.01
-            else:
-                reward = 0.0
             rewards.append(reward)
 
             baseline = 0.9 * baseline + 0.1 * reward
             advantage = reward - baseline
-            loss = -(advantage * log_prob + rl_cfg.entropy_coef * entropy)
+            loss = -(advantage * log_prob + self.rl.entropy_coef * entropy)
             batch_losses.append(loss)
 
-            if len(batch_losses) >= rl_cfg.batch_size:
+            if len(batch_losses) >= self.rl.batch_size:
                 optimizer.zero_grad()
                 total_loss = torch.stack(batch_losses).mean()
                 total_loss.backward()
-                torch.nn.utils.clip_grad_norm_(policy.parameters(), rl_cfg.max_grad_norm)
+                torch.nn.utils.clip_grad_norm_(policy.parameters(), self.rl.max_grad_norm)
                 optimizer.step()
                 batch_losses.clear()
 
@@ -104,15 +115,15 @@ class Trainer:
                 best_reward = reward
                 best_smiles = smiles
 
-            if ep % rl_cfg.log_interval == 0:
+            if ep % self.rl.log_interval == 0:
                 print(
-                    f"[ep {ep:04d}] reward={reward:.3f} valid={valid:.0f} unique={unique:.0f} "
-                    f"E={quantum_energy:.3f} atoms={[chem_cfg.allowed_atoms[a] for a in atoms]} "
-                    f"bonds={[BOND_LABELS[BOND_TYPES[b]] for b in bonds]} temp={temperature:.2f} "
-                    f"H={entropy.item():.2f} smiles={smiles}"
+                    f"[ep {ep:05d}] reward={reward:.3f} valid={valid:.0f} unique={unique:.0f} "
+                    f"nov_cls={novelty_classical:.3f} nov_q={novelty_quantum:.3f} prior={quantum_prior:.3f} "
+                    f"atoms={[self.chem.allowed_atoms[a] for a in atoms]} bonds={[BOND_LABELS[BOND_TYPES[b]] for b in bonds]} "
+                    f"temp={temperature:.2f} H={entropy.item():.2f} smiles={smiles}"
                 )
 
-            temperature = max(rl_cfg.min_temperature, temperature * rl_cfg.temp_decay)
+            temperature = max(self.rl.min_temperature, temperature * self.rl.temp_decay)
             history.steps.append(ep)
             history.valid_ratio.append(valid_count / ep)
             history.unique_ratio.append(len(seen_smiles) / ep)
@@ -122,10 +133,10 @@ class Trainer:
             optimizer.zero_grad()
             total_loss = torch.stack(batch_losses).mean()
             total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(policy.parameters(), rl_cfg.max_grad_norm)
+            torch.nn.utils.clip_grad_norm_(policy.parameters(), self.rl.max_grad_norm)
             optimizer.step()
 
-        self._summarize(rl_cfg.episodes, valid_count, discovered, rewards, best_smiles, best_reward, history)
+        self._summarize(self.rl.episodes, valid_count, discovered, rewards, best_smiles, best_reward, history)
 
     def _summarize(
         self,

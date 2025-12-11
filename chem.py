@@ -2,7 +2,6 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 import random
 import torch
-
 from rdkit import Chem
 from rdkit.Chem import rdchem, AllChem
 
@@ -17,25 +16,15 @@ class SampledMolecule:
     valid: float
 
 
-BOND_TYPES: Sequence[Optional[BondType]] = (
-    None,
-    BondType.SINGLE,
-    BondType.DOUBLE,
-    BondType.TRIPLE,
-)
+ALLOWED_VALENCE: Dict[str, int] = {"C": 4, "N": 3, "O": 2}
+BOND_TYPES: Sequence[Optional[BondType]] = (None, BondType.SINGLE, BondType.DOUBLE, BondType.TRIPLE)
 BOND_LABELS = {
     None: "NONE",
     BondType.SINGLE: "S",
     BondType.DOUBLE: "D",
     BondType.TRIPLE: "T",
 }
-BOND_ORDER = {
-    None: 0,
-    BondType.SINGLE: 1,
-    BondType.DOUBLE: 2,
-    BondType.TRIPLE: 3,
-}
-ALLOWED_VALENCE: Dict[str, int] = {"C": 4, "N": 3, "O": 2}
+BOND_ORDER = {None: 0, BondType.SINGLE: 1, BondType.DOUBLE: 2, BondType.TRIPLE: 3}
 
 
 def set_seed(seed: int) -> None:
@@ -44,7 +33,7 @@ def set_seed(seed: int) -> None:
 
 
 def atoms_bonds_to_smiles(atom_ids: Sequence[int], bond_ids: Sequence[int], allowed_atoms: Sequence[str]) -> Tuple[Optional[str], float]:
-    """Build a chain molecule and return canonical SMILES and validity flag."""
+    """Build a chain molecule from atom/bond choices. Returns canonical SMILES and validity flag."""
     mol = Chem.RWMol()
     try:
         atom_indices = []
@@ -59,12 +48,15 @@ def atoms_bonds_to_smiles(atom_ids: Sequence[int], bond_ids: Sequence[int], allo
             mol.AddBond(a_idx, b_idx, bond_type)
         Chem.SanitizeMol(mol)
         smiles = Chem.MolToSmiles(mol, canonical=True)
+        if "." in smiles:
+            return None, 0.0
         return smiles, 1.0
     except Exception:
         return None, 0.0
 
 
 def embed_geometry(smiles: str, min_dist2: float = 1e-3) -> Optional[List[Tuple[str, Tuple[float, float, float]]]]:
+    """RDKit ETKDG + UFF; reject fragments and overlapping atoms."""
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
         return None
@@ -90,10 +82,6 @@ def embed_geometry(smiles: str, min_dist2: float = 1e-3) -> Optional[List[Tuple[
     return geom
 
 
-def estimate_qubits(num_atoms: int) -> int:
-    return 2 * num_atoms + 2 * (num_atoms * (num_atoms - 1) // 2)
-
-
 def bond_matrix_from_smiles(smiles: str) -> Optional[List[List[int]]]:
     mol = Chem.MolFromSmiles(smiles)
     if mol is None:
@@ -111,11 +99,7 @@ def valence_usage(smiles: str) -> Optional[List[int]]:
     mat = bond_matrix_from_smiles(smiles)
     if mat is None:
         return None
-    n = len(mat)
-    usage = [0 for _ in range(n)]
-    for i in range(n):
-        usage[i] = sum(mat[i])
-    return usage
+    return [sum(row) for row in mat]
 
 
 def connectivity_components(smiles: str) -> int:
@@ -151,3 +135,7 @@ def distance_matrix(geom: List[Tuple[str, Tuple[float, float, float]]]) -> List[
             d = (dx * dx + dy * dy + dz * dz) ** 0.5
             dmat[i][j] = dmat[j][i] = d
     return dmat
+
+
+def estimate_qubits(num_atoms: int) -> int:
+    return 2 * num_atoms + 2 * (num_atoms * (num_atoms - 1) // 2)
