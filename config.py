@@ -20,7 +20,7 @@ class RLConfig:
 @dataclass
 class ChemConfig:
     allowed_atoms: Sequence[str] = ("C", "N", "O")
-    num_atoms: int = 5  # chain length
+    num_atoms: int = 3  # chain length for Level-5 spec
     min_dist2: float = 1e-3
 
 

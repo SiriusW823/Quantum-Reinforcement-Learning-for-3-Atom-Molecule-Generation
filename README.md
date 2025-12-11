@@ -2,7 +2,7 @@
 
 ![Reinforcement Learning Loop](assets/rl-diagram.jpg)
 
-This project upgrades a classical RL pipeline into a Level-2 quantum-informed environment using PennyLane, RDKit, PySCF, OpenFermion, and PyTorch. The agent samples atom/bond sequences to build SMILES; the reward blends classical novelty (V2) and quantum signals (V3: quantum novelty + quantum energy prior) to maximize `(valid/samples) * (unique/samples) → 1`.
+This project upgrades a classical RL pipeline into a **Level-5 full-quantum environment** using PennyLane, RDKit, PySCF, OpenFermion, and PyTorch. Both policy and prior are quantum-driven: the agent samples atom/bond sequences via a quantum policy network (QPN), builds SMILES, and the reward blends classical novelty (V2) and quantum signals (V3: quantum novelty + quantum energy prior) to maximize `(valid/samples) * (unique/samples) → 1`.
 
 ## Goals
 - Generate valid, unique molecules via REINFORCE.
@@ -14,11 +14,11 @@ This project upgrades a classical RL pipeline into a Level-2 quantum-informed en
 
 ## Modules
 - **chem.py**: RDKit molecule builder/validity; utilities for valence/connectivity/geometry; qubit estimate.
-- **policy.py**: Classical policy (feed-forward) for atoms/bonds; Categorical sampling with temperature/entropy.
+- **policy.py**: **Quantum policy network** (PennyLane QNode + StronglyEntanglingLayers) outputs logits for atoms/bonds with masking.
 - **novelty.py**: V2 classical novelty (hash frequency + kNN on Morgan fingerprints).
 - **encoder.py**: SMILES → features → AngleEmbedding angles; provides quantum state encoder.
 - **prior.py**: Quantum module (V3): geometry embedding, quantum Hamiltonian (PySCF→OpenFermion→JW), valence/connectivity/geometry penalties, short VQE, quantum reward.
-- **trainer.py**: REINFORCE loop with entropy regularization, temperature annealing, mini-batch updates, logging, convergence plots.
+- **trainer.py**: Quantum policy gradient (REINFORCE-style) with entropy regularization, temperature annealing, mini-batch updates, logging, convergence plots.
 - **config.py**: Hyperparameters (RL, chemistry, quantum).
 - **train.py**: Entry point wiring everything together.
 
@@ -27,7 +27,7 @@ This project upgrades a classical RL pipeline into a Level-2 quantum-informed en
 2. **Valence penalty**: Σ β (valence(i) − allowed_valence(i))² as a Hamiltonian term.
 3. **Connectivity penalty**: δ |components − 1| as a Hamiltonian term.
 4. **Geometry penalty**: Σ γ exp(−(d_ij − d0)² / σ²) as a Hamiltonian term.
-5. **Quantum novelty**: based on quantum state fidelity (placeholder uses classical novelty proxy; extend via encoder states).
+5. **Quantum novelty**: based on quantum state fidelity (state buffer via encoder; novelty = 1 − avg fidelity).
 6. **Combined reward**: `reward = valid * novelty_classical * novelty_quantum * quantum_energy_prior`, where `quantum_energy_prior = exp(−E/λ)` (E = VQE energy + penalties).
 
 ## Default Chemical Space

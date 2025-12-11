@@ -7,9 +7,11 @@ import torch.optim as optim
 
 import config
 from chem import BOND_LABELS, BOND_TYPES, atoms_bonds_to_smiles, set_seed
-from policy import PolicyNet, sample_action
+from policy import QuantumPolicyNet, sample_action
 from prior import build_quantum_prior
 from novelty import ClassicalNovelty
+from encoder import prepare_state
+from utils import plot_convergence
 
 
 @dataclass
@@ -21,15 +23,17 @@ class History:
 
 
 class Trainer:
-    def __init__(self):
+    def __init__(self, use_quantum_policy: bool = True, use_quantum_prior: bool = True):
         self.rl = config.rl
         self.chem = config.chem
         self.q = config.quantum
         self.device = "cpu"
+        self.use_quantum_policy = use_quantum_policy
+        self.use_quantum_prior = use_quantum_prior
 
     def run(self) -> None:
         set_seed(self.rl.seed)
-        policy = PolicyNet(
+        policy = QuantumPolicyNet(
             n_atoms=len(self.chem.allowed_atoms),
             n_bonds=len(BOND_TYPES),
             num_atoms_in_chain=self.chem.num_atoms,
@@ -51,9 +55,11 @@ class Trainer:
             geometry_weight=self.q.geometry_penalty_weight,
             geom_d0=self.q.geom_d0,
             geom_sigma=self.q.geom_sigma,
-            lambda_reward=self.q.lambda_reward,
-        )
+        ) if self.use_quantum_prior else (lambda x: 1.0)
+
         novelty_cls = ClassicalNovelty(k=self.q.knn_k)
+        state_buffer: List[torch.Tensor] = []
+        max_states = 200
 
         history = History([], [], [], [])
         rewards: List[float] = []
@@ -66,34 +72,45 @@ class Trainer:
         best_smiles: Optional[str] = None
 
         for ep in range(1, self.rl.episodes + 1):
-            atoms, bonds, log_prob, entropy = sample_action(policy, temperature=temperature)
+            atoms, bonds, log_prob, entropy = sample_action(
+                policy, allowed_atoms=list(self.chem.allowed_atoms), temperature=temperature
+            )
             smiles, valid = atoms_bonds_to_smiles(atoms, bonds, self.chem.allowed_atoms)
-            if valid and smiles and "." in smiles and not self.chem.allow_disconnected:
+            if valid and smiles and "." in smiles:
                 valid = 0.0
             valid_count += int(valid)
 
             unique = 1.0 if smiles and smiles not in seen_smiles else 0.0
             novelty_cls.update(smiles if smiles else "")
             novelty_classical = novelty_cls.novelty(smiles if smiles else "")
-            novelty_quantum = 0.0
-            quantum_prior = 0.0
 
+            novelty_quantum = 1.0
+            quantum_prior = 1.0
             if valid and smiles:
-                quantum_energy = prior_fn(smiles)
-                quantum_prior = max(self.q.score_min, min(self.q.score_max, math.exp(-quantum_energy / self.q.lambda_reward)))
-                # Quantum novelty via placeholder fidelity (extend with encoder states if desired)
-                novelty_quantum = novelty_classical  # placeholder proxy
+                # Quantum novelty via fidelity proxy
+                if unique:
+                    psi = prepare_state(smiles, config.encoder.n_qubits)()
+                    state_buffer.append(torch.tensor(psi))
+                    if len(state_buffer) > max_states:
+                        state_buffer.pop(0)
+                if len(state_buffer) > 1:
+                    psi_new = state_buffer[-1]
+                    fid_list = []
+                    for psi_old in state_buffer[:-1]:
+                        fid = torch.abs(torch.dot(psi_new.conj(), psi_old)) ** 2
+                        fid_list.append(fid.item())
+                    avg_fid = sum(fid_list) / len(fid_list) if fid_list else 0.0
+                    novelty_quantum = 1.0 - avg_fid
+                quantum_prior = prior_fn(smiles)
 
-            reward = (
-                valid
-                * novelty_classical
-                * novelty_quantum
-                * quantum_prior
-            )
-            # Handle uniqueness gating
-            if unique == 0.0:
-                reward *= 0.5
-            if unique:
+            if not valid:
+                reward = 0.0
+            elif unique:
+                reward = novelty_classical * novelty_quantum * quantum_prior
+            else:
+                reward = -0.02
+
+            if unique and valid:
                 seen_smiles.add(smiles)
                 discovered.append(smiles)
             rewards.append(reward)
@@ -161,16 +178,7 @@ class Trainer:
         for s in discovered:
             print("  ", s)
         try:
-            plt.figure(figsize=(8, 4))
-            plt.plot(history.steps, history.valid_ratio, label="valid/samples")
-            plt.plot(history.steps, history.unique_ratio, label="unique/samples")
-            plt.plot(history.steps, history.combo, label="(valid/samples)*(unique/samples)")
-            plt.xlabel("Episode")
-            plt.ylabel("Ratio")
-            plt.title("Convergence")
-            plt.legend()
-            plt.tight_layout()
-            plt.savefig("convergence.png", dpi=150)
+            plot_convergence(history.steps, history.valid_ratio, history.unique_ratio, history.combo)
             print("Saved convergence plot to convergence.png")
         except Exception as e:
             print("Plotting failed:", e)

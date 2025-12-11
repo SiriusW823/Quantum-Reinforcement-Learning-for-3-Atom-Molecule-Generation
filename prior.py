@@ -160,7 +160,6 @@ def build_quantum_prior(
     geometry_weight: float,
     geom_d0: float,
     geom_sigma: float,
-    lambda_reward: float,
 ) -> Callable[[str], float]:
     cache: dict[str, float] = {}
 
@@ -180,8 +179,9 @@ def build_quantum_prior(
         try:
             h_total = assemble_total_hamiltonian(h_chem, h_val, h_conn, h_geom)
             energy = vqe_energy(h_total, n_qubits=n_qubits, layers=layers, steps=steps, stepsize=stepsize)
-            cache[smiles] = energy
-            return energy
+            score = max(score_min, min(score_max, math.exp(-energy / energy_scale)))
+            cache[smiles] = score
+            return score
         except Exception:
             return 0.0
 
